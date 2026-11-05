@@ -1,0 +1,10 @@
+# "Run for it" stations: the listed cantons count as visited if you spend at least
+# <minutes> at this station, because you can run across the border and back. Either:
+#   * the train you are on stops here for >= <minutes> (scheduled stop time), or
+#   * you get off here and leave >= <minutes> later (next vehicle, walk or bike).
+#
+# station (exact name, see `./sbb find`)<TAB>minutes<TAB>cantons (comma-separated)
+Ziegelbrücke	1	Glarus
+Rorschach	18	St. Gallen,Thurgau
+Aigle	20	Valais
+Nyon	20	Genève

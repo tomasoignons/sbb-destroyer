@@ -1,0 +1,436 @@
+#!/usr/bin/env python3
+"""sbb — find the fastest public-transport journey through all 26 Swiss cantons.
+
+Typical use:
+    ./sbb setup                                  # once: convert GTFS, map stops to cantons, build solver
+    ./sbb find "genève"                          # look up exact station names
+    ./sbb route "Genève" --date saturday --start 05:00
+    ./sbb route "Genève" --date 2026-11-14 --start 04:30 --sweep-end 08:00
+    ./sbb route "Genève" --map                   # ... and open it on an interactive map
+    ./sbb map route.json                         # map of a saved itinerary
+    ./sbb web --open                             # web app: compute, store and browse routes
+    ./sbb status                                 # what is prepared
+
+Only the Python standard library is needed here; the heavy lifting runs in the `sbb`
+conda env (prep/*.py) and the Rust solver (solver/).
+"""
+import argparse
+import datetime as dt
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+import webbrowser
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+PARQUET = ROOT / "data" / "parquet"
+DAYS = ROOT / "data" / "days"
+SOLVER_DIR = ROOT / "solver"
+SOLVER_BIN = SOLVER_DIR / "target" / "release" / "canton-solver"
+CANTONS = PARQUET / "stop_cantons.parquet"
+SHAPES = PARQUET / "cantons.geojson"
+ROUTES = ROOT / "data" / "routes"
+DEFAULT_GDB = "swissBOUNDARIES3D_1_5_LV95_LN02.gdb"
+WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+
+USE_COLOR = sys.stderr.isatty() and not os.environ.get("NO_COLOR")
+
+
+def info(msg):
+    print(f"\033[1;34m»\033[0m {msg}" if USE_COLOR else f"» {msg}", file=sys.stderr, flush=True)
+
+
+def die(msg, code=1):
+    print(f"\033[1;31merror:\033[0m {msg}" if USE_COLOR else f"error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+# --------------------------------------------------------------------------- helpers
+def find_python() -> str:
+    """Python interpreter of the conda env holding polars/geopandas."""
+    cands = []
+    if os.environ.get("SBB_PYTHON"):
+        cands.append(os.environ["SBB_PYTHON"])
+    if os.environ.get("CONDA_PREFIX"):
+        cands.append(os.path.join(os.environ["CONDA_PREFIX"], "bin", "python"))
+    conda = shutil.which("conda")
+    if conda:
+        base = Path(conda).resolve().parent.parent  # <base>/bin/conda or <base>/condabin/conda
+        cands.append(str(base / "envs" / "sbb" / "bin" / "python"))
+    for c in cands:
+        if Path(c).exists():
+            ok = subprocess.run([c, "-I", "-c", "import polars, geopandas"], capture_output=True).returncode == 0
+            if ok:
+                return c
+    die("no Python with polars + geopandas found.\n"
+        "  create the env:  conda env create -f environment.yml\n"
+        "  or point to one: export SBB_PYTHON=/path/to/python")
+
+
+def run(cmd, **kw):
+    info(" ".join(shlex.quote(str(c)) for c in cmd))
+    r = subprocess.run([str(c) for c in cmd], cwd=ROOT, **kw)
+    if r.returncode != 0:
+        die(f"command failed with exit code {r.returncode}", r.returncode)
+
+
+def feed_range():
+    """(first, last) valid date of the GTFS feed, from feed_info.txt."""
+    for p in [ROOT / "feed_info.txt"]:
+        if p.exists():
+            lines = p.read_text(encoding="utf-8-sig").splitlines()
+            head = [h.strip('"') for h in lines[0].split(",")]
+            row = [v.strip('"') for v in lines[1].split(",")]
+            d = dict(zip(head, row))
+            f = lambda s: dt.date(int(s[:4]), int(s[4:6]), int(s[6:8]))
+            return f(d["feed_start_date"]), f(d["feed_end_date"])
+    return None
+
+
+def parse_date(s: str) -> dt.date:
+    s = s.strip().lower()
+    today = dt.date.today()
+    if s == "today":
+        d = today
+    elif s == "tomorrow":
+        d = today + dt.timedelta(days=1)
+    elif s in WEEKDAYS or s[:3] in [w[:3] for w in WEEKDAYS]:
+        wd = [w[:3] for w in WEEKDAYS].index(s[:3])
+        d = today + dt.timedelta(days=(wd - today.weekday()) % 7 or 7)
+    else:
+        try:
+            d = dt.date.fromisoformat(s)
+        except ValueError:
+            raise argparse.ArgumentTypeError(
+                f"invalid date {s!r} (use YYYY-MM-DD, today, tomorrow or a weekday name)")
+    rng = feed_range()
+    if rng and not (rng[0] <= d <= rng[1]):
+        raise argparse.ArgumentTypeError(f"{d} is outside the timetable ({rng[0]} .. {rng[1]})")
+    return d
+
+
+def hhmm(s: str) -> str:
+    try:
+        h, m = s.split(":") if ":" in s else (s, "0")
+        h, m = int(h), int(m)
+        assert 0 <= h < 72 and 0 <= m < 60
+    except (ValueError, AssertionError):
+        raise argparse.ArgumentTypeError(f"invalid time {s!r} (use HH:MM, may exceed 24:00)")
+    return f"{h:02d}:{m:02d}"
+
+
+def ensure_setup():
+    if not (PARQUET / "stop_times.parquet").exists() or not CANTONS.exists():
+        die("data not prepared yet — run:  ./sbb setup")
+
+
+def ensure_solver(force=False):
+    if force or not SOLVER_BIN.exists():
+        if not shutil.which("cargo"):
+            die("cargo not found — install Rust from https://rustup.rs")
+        run(["cargo", "build", "--release", "--manifest-path", SOLVER_DIR / "Cargo.toml"])
+
+
+def ensure_shapes(force=False, gdb=DEFAULT_GDB):
+    if force or not SHAPES.exists():
+        run([find_python(), "-I", ROOT / "prep" / "canton_shapes.py", "--gdb", gdb, "--out", SHAPES])
+
+
+def make_map(json_path: Path, out: Path = None, open_it=True) -> Path:
+    ensure_shapes()
+    sys.path.insert(0, str(ROOT / "viz"))
+    import make_map as mm
+    route = __import__("json").loads(Path(json_path).read_text(encoding="utf-8"))
+    cantons = __import__("json").loads(SHAPES.read_text(encoding="utf-8"))
+    out = Path(out) if out else Path(json_path).with_suffix(".html")
+    out.write_text(mm.render(route, cantons), encoding="utf-8")
+    info(f"map written to {out}")
+    if open_it:
+        try:
+            webbrowser.open(out.resolve().as_uri())
+        except Exception:
+            pass
+    return out
+
+
+TIMETABLE_FORMAT = 7  # bump when build_day.py output changes (3 = bike, 4/5 = 1-min changes everywhere)
+
+
+def ensure_day(date: dt.date, rebuild=False, extra=()):
+    ensure_setup()
+    d = DAYS / date.isoformat()
+    meta = d / "meta.json"
+    outdated = meta.exists() and __import__("json").loads(meta.read_text()).get("format", 0) < TIMETABLE_FORMAT
+    if outdated:
+        info(f"timetable of {date} was built by an older version — rebuilding")
+    if rebuild or outdated or not meta.exists():
+        run([find_python(), "-I", ROOT / "prep" / "build_day.py", "--date", date.isoformat(), *extra])
+    return d
+
+
+# --------------------------------------------------------------------------- commands
+def cmd_setup(a):
+    py = find_python()
+    if a.force or not (PARQUET / "stop_times.parquet").exists():
+        run([py, "-I", ROOT / "prep" / "convert_gtfs.py", "--gtfs", a.gtfs, "--out", PARQUET])
+    else:
+        info("GTFS already converted (use --force to redo)")
+    if a.force or not CANTONS.exists():
+        if not (ROOT / a.gdb).exists() and not Path(a.gdb).exists():
+            die(f"boundaries not found: {a.gdb} (pass --gdb)")
+        run([py, "-I", ROOT / "prep" / "stop_cantons.py", "--gdb", a.gdb, "--parquet", PARQUET])
+    else:
+        info("stops already mapped to cantons (use --force to redo)")
+    ensure_shapes(force=a.force, gdb=a.gdb)
+    ensure_solver(force=a.force)
+    info("setup complete — try:  ./sbb route \"Genève\" --date saturday")
+
+
+def cmd_day(a):
+    extra = []
+    for flag in ["days", "walk_radius", "walk_speed", "walk_detour", "walk_buffer", "default_change", "platform_change",
+                 "bike_max_km", "bike_speed", "bike_detour", "bike_buffer", "bike_k_near", "bike_k_hub"]:
+        v = getattr(a, flag)
+        if v is not None:
+            extra += [f"--{flag.replace('_', '-')}", str(v)]
+    if a.sbb_change_times:
+        extra.append("--sbb-change-times")
+    if a.bike_banned_cantons is not None:
+        extra += ["--bike-banned-cantons", a.bike_banned_cantons]
+    if a.exclude_route_types is not None:
+        extra += ["--exclude-route-types", a.exclude_route_types]
+    ensure_day(a.date, rebuild=True, extra=extra)
+
+
+def cmd_find(a):
+    ensure_solver()
+    d = ensure_day(a.date)
+    run([SOLVER_BIN, "--data", d, "--find", a.query], stderr=subprocess.DEVNULL)
+
+
+def cmd_route(a):
+    ensure_solver()
+    d = ensure_day(a.date)
+    cmd = [SOLVER_BIN, "--data", d, "--from", a.station, "--start", a.start,
+           "--beams", a.beams, "--min-dwell", a.min_dwell, "--max-hours", a.max_hours,
+           "--evict", a.evict]
+    if a.sweep_end:
+        cmd += ["--sweep-end", a.sweep_end, "--sweep-step", a.sweep_step]
+    if a.no_walk:
+        cmd.append("--no-walk")
+    if a.no_bike:
+        cmd.append("--no-bike")
+    for v in a.via or []:
+        cmd += ["--via", v]
+    if a.via_first:
+        cmd.append("--via-first")
+    if a.to:
+        cmd += ["--to", a.to]
+    if a.no_bonus:
+        cmd.append("--no-bonus")
+    else:
+        cmd += ["--bonus-file", ROOT / "bonus_stations.tsv"]
+    if a.no_detour:
+        cmd.append("--no-detour")
+    else:
+        cmd += ["--detour-file", ROOT / "detour_rules.tsv"]
+    if a.have:
+        cmd += ["--have", a.have]
+    if a.skip:
+        cmd += ["--skip", a.skip]
+    if a.upper_bound:
+        cmd += ["--upper-bound", a.upper_bound]
+    json_path = Path(a.json).resolve() if a.json else None
+    if a.map and not json_path:
+        ROUTES.mkdir(parents=True, exist_ok=True)
+        slug = "".join(ch if ch.isalnum() else "_" for ch in a.station).strip("_")
+        json_path = ROUTES / f"{slug}_{a.date.isoformat()}_{a.start.replace(':', '')}.json"
+    if json_path:
+        cmd += ["--json", json_path]
+    cmd += a.solver_args
+    run(cmd)
+    if a.map:
+        make_map(json_path, open_it=not a.no_open)
+
+
+def cmd_map(a):
+    if not Path(a.route).exists():
+        die(f"{a.route} not found (create one with: ./sbb route <station> --json {a.route})")
+    make_map(Path(a.route), a.out, open_it=not a.no_open)
+
+
+def cmd_web(a):
+    ensure_setup()
+    ensure_shapes()
+    ensure_solver()
+    cmd = [sys.executable, ROOT / "web" / "server.py", "--host", a.host, "--port", str(a.port)]
+    if a.threads:
+        cmd += ["--threads", str(a.threads)]
+    if a.open:
+        cmd.append("--open")
+    try:
+        subprocess.run([str(c) for c in cmd], cwd=ROOT)
+    except KeyboardInterrupt:
+        pass
+
+
+def cmd_status(a):
+    rng = feed_range()
+    print(f"timetable validity : {rng[0]} .. {rng[1]}" if rng else "timetable validity : unknown (no feed_info.txt)")
+    print(f"GTFS converted     : {'yes' if (PARQUET / 'stop_times.parquet').exists() else 'no  (./sbb setup)'}")
+    print(f"stops → cantons    : {'yes' if CANTONS.exists() else 'no  (./sbb setup)'}")
+    print(f"canton shapes      : {'yes' if SHAPES.exists() else 'no  (./sbb setup)'}")
+    print(f"solver built       : {'yes' if SOLVER_BIN.exists() else 'no  (./sbb setup)'}")
+    days = sorted(p.name for p in DAYS.glob("*") if (p / "meta.json").exists()) if DAYS.exists() else []
+    print(f"prepared dates     : {', '.join(f'{x} ({WEEKDAYS[dt.date.fromisoformat(x).weekday()][:3]})' for x in days) or 'none'}")
+
+
+def cmd_clean(a):
+    targets = [DAYS / x.isoformat() for x in a.dates] if a.dates else [DAYS]
+    for t in targets:
+        if t.exists():
+            info(f"removing {t}")
+            shutil.rmtree(t)
+
+
+# --------------------------------------------------------------------------- parser
+class Fmt(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter):
+    pass
+
+
+def build_parser():
+    date_help = "travel date: YYYY-MM-DD, today, tomorrow or a weekday (next one)"
+    p = argparse.ArgumentParser(prog="sbb", description=__doc__, formatter_class=Fmt)
+    sub = p.add_subparsers(dest="cmd", metavar="COMMAND", required=True)
+
+    s = sub.add_parser("setup", help="one-time preparation: convert GTFS, map stops, build solver",
+                       formatter_class=Fmt,
+                       description="Convert the GTFS CSVs to parquet, assign every stop to a canton "
+                                   "and compile the Rust solver. Skips steps already done.")
+    s.add_argument("--gtfs", default=".", help="directory with the GTFS .txt files")
+    s.add_argument("--gdb", default=DEFAULT_GDB, help="swissBOUNDARIES3D FileGDB")
+    s.add_argument("--force", action="store_true", help="redo every step")
+    s.set_defaults(fn=cmd_setup)
+
+    s = sub.add_parser("route", help="compute the fastest all-cantons journey", formatter_class=Fmt,
+                       description="Find the fastest journey stepping into all 26 cantons. The day's "
+                                   "timetable is built automatically if needed.",
+                       epilog="examples:\n"
+                              "  sbb route \"Genève\" --date saturday\n"
+                              "  sbb route \"Zürich HB\" --start 04:30 --sweep-end 08:00 --sweep-step 15\n"
+                              "  sbb route \"Lugano\" --beams 8,32,128,512 --json lugano.json\n"
+                              "  sbb route \"Genève\" --via Brig --via Lugano --via Chur\n"
+                              "  sbb route Luzern -s 12:44 --have GE,VD,NE,BE --to \"Zürich HB\"\n"
+                              "  sbb route \"Genève\" -- --pair-limit 10   (extra raw solver flags after --)")
+    s.add_argument("station", help="start station, exact name (see `sbb find`)")
+    s.add_argument("-d", "--date", type=parse_date, default=parse_date("saturday"), help=date_help)
+    s.add_argument("-s", "--start", type=hhmm, default="05:00", help="earliest start time HH:MM")
+    s.add_argument("-e", "--sweep-end", type=hhmm, help="also try later start times up to HH:MM (parallel)")
+    s.add_argument("--sweep-step", type=int, default=10, help="minutes between swept start times")
+    s.add_argument("-b", "--beams", default="8,32",
+                   help="search widths of successive passes (wider = better, slower, more RAM)")
+    s.add_argument("--evict", choices=["bound", "popcount", "spread"], default="bound",
+                   help="which labels survive when a stop is full")
+    s.add_argument("--min-dwell", type=int, default=0,
+                   help="min scheduled dwell [s] for a hop-off/hop-on to count")
+    s.add_argument("--max-hours", type=float, default=36, help="search horizon")
+    s.add_argument("--no-walk", action="store_true", help="forbid walking and cycling between stops")
+    s.add_argument("--no-bike", action="store_true", help="forbid cycling (walking stays allowed)")
+    s.add_argument("-v", "--via", action="append", metavar="STATION",
+                   help="station the route must pass through, in order; repeat for several (max 5)")
+    s.add_argument("-t", "--to", metavar="STATION",
+                   help="mandatory end station: finish here after all cantons (optimise part of the run)")
+    s.add_argument("--via-first", action="store_true",
+                   help="the --via stations are the first places to go (fastest way to each, in order), "
+                        "then the free canton search continues from the last one")
+    s.add_argument("--no-detour", action="store_true",
+                   help="ignore detour_rules.tsv (at Lausanne/Renens without Genève → go to Genève first)")
+    s.add_argument("--no-bonus", action="store_true",
+                   help="ignore bonus_stations.tsv (Ziegelbrücke → Glarus, Rorschach → Thurgau, …)")
+    s.add_argument("--have", metavar="CANTONS",
+                   help="cantons already validated (optimise part of the trip), e.g. \"GE,VD,NE\"")
+    s.add_argument("--skip", help="comma-separated cantons not required, e.g. \"Ticino,Valais\"")
+    s.add_argument("--upper-bound", type=hhmm, help="known arrival HH:MM to prune with")
+    s.add_argument("-j", "--json", help="write the itinerary as JSON to this file")
+    s.add_argument("-m", "--map", action="store_true",
+                   help="render an interactive HTML map (next to --json, or in data/routes/) and open it")
+    s.add_argument("--no-open", action="store_true", help="with --map: don't open the browser")
+    s.set_defaults(fn=cmd_route)
+
+    s = sub.add_parser("map", help="interactive HTML map of a saved itinerary", formatter_class=Fmt,
+                       description="Render an itinerary JSON (from `route --json`) as a self-contained "
+                                   "HTML page: route on a map colored by mode, clickable list of connections, "
+                                   "cantons in visit order. Needs internet for the map tiles.")
+    s.add_argument("route", help="itinerary JSON")
+    s.add_argument("-o", "--out", help="output HTML (default: same name as the JSON)")
+    s.add_argument("--no-open", action="store_true", help="don't open the browser")
+    s.set_defaults(fn=cmd_map)
+
+    s = sub.add_parser("find", help="search station names", formatter_class=Fmt,
+                       description="List stations whose name contains QUERY (case-insensitive).")
+    s.add_argument("query")
+    s.add_argument("-d", "--date", type=parse_date, default=parse_date("saturday"), help=date_help)
+    s.set_defaults(fn=cmd_find)
+
+    s = sub.add_parser("day", help="(re)build the timetable of a date with custom options",
+                       formatter_class=Fmt,
+                       description="Rebuild data/days/<date>/. Options left unset keep build_day.py defaults.")
+    s.add_argument("date", type=parse_date, help=date_help)
+    s.add_argument("--days", type=int, help="service days covered from the date (default 2)")
+    s.add_argument("--walk-radius", type=float, help="max walk between stops [m] (default 800)")
+    s.add_argument("--walk-speed", type=float, help="walking speed [km/h] (default 4.5)")
+    s.add_argument("--walk-detour", type=float, help="street detour factor (default 1.3)")
+    s.add_argument("--walk-buffer", type=int, help="extra seconds per walk (default 60)")
+    s.add_argument("--default-change", type=int,
+                   help="min change time at the same stop [s] (default 60, all stations)")
+    s.add_argument("--platform-change", type=int,
+                   help="every SBB-listed transfer (platforms, nearby stops) [s] (default 60)")
+    s.add_argument("--sbb-change-times", action="store_true",
+                   help="use SBB's official transfer times where they exist (more conservative)")
+    s.add_argument("--bike-max-km", type=float, help="max bike leg, road distance [km] (default 10; 0 = no bike)")
+    s.add_argument("--bike-speed", type=float, help="cycling speed [km/h] (default 20)")
+    s.add_argument("--bike-detour", type=float, help="road / straight-line distance (default 1.3)")
+    s.add_argument("--bike-buffer", type=int, help="extra seconds per bike leg (default 120)")
+    s.add_argument("--bike-banned-cantons",
+                   help="no bike legs touching these cantons (default: both Appenzell; '' = none)")
+    s.add_argument("--bike-k-near", type=int, help="nearest stations linked per canton in range (default 3)")
+    s.add_argument("--bike-k-hub", type=int, help="busiest stations linked per canton in range (default 3)")
+    s.add_argument("--exclude-route-types", help="GTFS route types to drop (default '715,1500'; '' = none)")
+    s.set_defaults(fn=cmd_day)
+
+    s = sub.add_parser("web", help="start the web app (compute, store and browse routes)", formatter_class=Fmt,
+                       description="Local web app: type a start station, routes are computed in the background "
+                                   "(one at a time), stored in data/app.db and shown on a map.")
+    s.add_argument("--host", default="127.0.0.1", help="interface (0.0.0.0 to reach it from other devices)")
+    s.add_argument("--port", type=int, default=8026)
+    s.add_argument("--threads", type=int, help="max parallel searches per job (default: cores, limited by free RAM)")
+    s.add_argument("--open", action="store_true", help="open the browser")
+    s.set_defaults(fn=cmd_web)
+
+    s = sub.add_parser("status", help="show what is prepared")
+    s.set_defaults(fn=cmd_status)
+
+    s = sub.add_parser("clean", help="delete built day timetables", formatter_class=Fmt)
+    s.add_argument("dates", nargs="*", type=parse_date, help="dates to delete (default: all)")
+    s.set_defaults(fn=cmd_clean)
+    return p
+
+
+def main():
+    argv = sys.argv[1:]
+    raw = []
+    if "--" in argv:  # everything after `--` goes verbatim to the solver
+        i = argv.index("--")
+        argv, raw = argv[:i], argv[i + 1:]
+    a = build_parser().parse_args(argv)
+    a.solver_args = raw
+    try:
+        a.fn(a)
+    except KeyboardInterrupt:
+        sys.exit(130)
+
+
+if __name__ == "__main__":
+    main()

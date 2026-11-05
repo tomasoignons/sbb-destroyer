@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>/*TITLE*/</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>/*CSS*/</style>
+</head>
+<body>
+<aside id="side"></aside>
+<div id="mapwrap">
+  <div id="map"></div>
+  <div class="mapbtn">
+    <button id="all">Whole route</button>
+    <button id="theme" title="Toggle light / dark">Dark</button>
+  </div>
+</div>
+<script>/*JS*/</script>
+<script>
+const ROUTE = /*ROUTE*/null;
+const CANTONS = /*CANTONS*/null;
+const themeBtn = document.getElementById("theme");
+const view = new RouteView(document.getElementById("map"), CANTONS, {
+  onTheme: dark => { themeBtn.textContent = dark ? "Light" : "Dark"; },
+  onSelect: i => history.replaceState(null, "", i >= 0 ? `#leg=${i}` : location.pathname),
+});
+themeBtn.addEventListener("click", () => view.toggleTheme());
+document.getElementById("all").addEventListener("click", () => view.select(-1));
+const m = location.hash.match(/leg=(\d+)/);
+view.render(ROUTE, document.getElementById("side"), { leg: m ? +m[1] : -1 });
+</script>
+</body>
+</html>

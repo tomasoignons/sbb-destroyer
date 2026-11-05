@@ -1,0 +1,8 @@
+# raw GTFS + boundaries (large, downloaded)
+/*.txt
+/*.zip
+/*.gdb/
+# generated
+/data/
+/solver/target/
+*.json

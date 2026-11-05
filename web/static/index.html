@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Canton Run</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23d52b1e'/%3E%3Cpath d='M13 7h6v6h6v6h-6v6h-6v-6H7v-6h6z' fill='white'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<link rel="stylesheet" href="/static/route_view.css">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<aside id="side">
+  <!-- list of routes + form -->
+  <section id="home">
+    <header class="app-head">
+      <h1>Canton Run</h1>
+      <p>Fastest public-transport trip through all 26 cantons</p>
+    </header>
+
+    <form id="new" class="card form" autocomplete="off" novalidate>
+      <h2>New route</h2>
+      <label class="field">
+        <span>Start station</span>
+        <div class="combo">
+          <input id="station" name="station" type="text" placeholder="e.g. Genève, Zürich HB, Lugano"
+                 role="combobox" aria-expanded="false" aria-controls="suggest" aria-autocomplete="list" required>
+          <ul id="suggest" class="suggest" role="listbox" hidden></ul>
+        </div>
+      </label>
+      <div class="field">
+        <span>Goes via (in this order, optional)</span>
+        <ol id="via-list" class="via-list"></ol>
+        <div class="combo">
+          <input id="via-in" type="text" role="combobox" aria-expanded="false" aria-controls="via-suggest"
+                 aria-autocomplete="list" aria-label="Add a via station">
+          <ul id="via-suggest" class="suggest" role="listbox" hidden></ul>
+        </div>
+        <label class="toggle"><input id="via_first" type="checkbox" role="switch">
+          <span class="track" aria-hidden="true"></span>
+          <span>Go to these first, directly <span class="muted-s">— then free search from the last one</span></span></label>
+      </div>
+      <label class="field">
+        <span>End station <span class="muted-s">(optional, must finish there)</span></span>
+        <div class="combo">
+          <input id="end_station" type="text" role="combobox" aria-expanded="false" aria-controls="end-suggest"
+                 aria-autocomplete="list" placeholder="anywhere">
+          <ul id="end-suggest" class="suggest" role="listbox" hidden></ul>
+        </div>
+      </label>
+      <div class="field">
+        <span>Already validated <span class="muted-s">(optimise part of the trip)</span></span>
+        <div id="have" class="have" role="group" aria-label="Cantons already validated"></div>
+      </div>
+      <div class="row3">
+        <label class="field"><span>Date</span><input id="date" name="date" type="date" required></label>
+        <label class="field"><span>Earliest start</span><input id="start" name="start" type="time" value="05:00" required></label>
+        <label class="field"><span>Try starts until</span><input id="sweep_end" name="sweep_end" type="time"></label>
+      </div>
+      <fieldset class="field">
+        <legend>Search quality</legend>
+        <div class="seg" id="quality"></div>
+        <div class="hint-s" id="quality-hint"></div>
+      </fieldset>
+      <label class="check bikeopt"><input id="bike" name="bike" type="checkbox" checked>
+        Bike allowed — up to 10 km per leg at ~20 km/h</label>
+      <label class="check"><input id="bonus" name="bonus" type="checkbox" checked>
+        <span>Run-for-it stations: <span id="bonus-desc" class="muted-s"></span></span></label>
+      <label class="check"><input id="detour" name="detour" type="checkbox" checked>
+        <span>Detour rules: <span id="detour-desc" class="muted-s"></span></span></label>
+      <details class="adv">
+        <summary>More options</summary>
+        <div class="row2">
+          <label class="field"><span>Min. dwell for hop off/on (s)</span>
+            <input id="min_dwell" name="min_dwell" type="number" min="0" max="600" step="10" value="0"></label>
+          <label class="field"><span>Note</span><input id="note" name="note" type="text" maxlength="200" placeholder="optional"></label>
+        </div>
+        <label class="check"><input id="walk" name="walk" type="checkbox" checked> Allow walking between nearby stops</label>
+      </details>
+      <div class="form-err" id="form-err" role="alert" hidden></div>
+      <button class="primary" type="submit" id="submit">Compute route</button>
+      <p class="fine">Trip time runs from boarding the first vehicle (or bike) until you step into the 26th canton.
+        “Try starts until” tests later start times too and keeps the shortest trip.</p>
+    </form>
+
+    <div class="list-head">
+      <h2>Saved routes</h2>
+      <select id="sort" aria-label="Sort routes">
+        <option value="new">Newest first</option>
+        <option value="fast">Shortest trip first</option>
+      </select>
+    </div>
+    <ul id="routes" class="routes"></ul>
+  </section>
+
+  <!-- one route -->
+  <section id="detail" hidden>
+    <div class="detail-bar">
+      <button class="ghost" id="back">← All routes</button>
+      <div class="spacer"></div>
+      <button class="ghost" id="redo" title="Copy these settings into the form">Edit &amp; recompute</button>
+      <button class="ghost danger" id="del">Delete</button>
+    </div>
+    <div id="job" hidden></div>
+    <div id="itinerary"></div>
+  </section>
+</aside>
+
+<div id="mapwrap">
+  <div id="map"></div>
+  <div class="mapbtn">
+    <button id="all">Whole route</button>
+    <button id="theme" title="Toggle light / dark">Dark</button>
+  </div>
+</div>
+
+<script src="/static/route_view.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

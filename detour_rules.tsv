@@ -1,0 +1,10 @@
+# Detour rules: "if you are at <station> and don't have <canton(s)> yet, go get them now".
+# A traveller in that situation may only board a train that still stops in the canton(s)
+# later in its run, may only get off once there (or at a run-for-it station that delivers
+# the canton, e.g. Nyon -> Genève, see bonus_stations.tsv), and may not walk or cycle away
+# (platform changes between the listed stations are fine). This prunes routes that leave a
+# dead-end corner for later.
+#
+# station (exact name, see `./sbb find`)<TAB>cantons (comma-separated)
+Lausanne	Genève
+Renens VD	Genève

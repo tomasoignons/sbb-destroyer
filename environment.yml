@@ -1,0 +1,12 @@
+name: sbb
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - polars
+  - geopandas
+  - pyogrio
+  - pyproj
+  - shapely
+  - numpy
+  - pyarrow
