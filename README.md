@@ -87,6 +87,15 @@ Set `SBB_PYTHON=/path/to/python` if the `sbb` conda env lives somewhere unusual.
   on, may only get off once Genève is reached (or at a run-for-it station that gives
   Genève, i.e. Nyon), and may not walk or cycle away (platform changes
   are fine). Turn off with `--no-detour` or the web checkbox.
+* **Basel SBB ↔ Biel/Bienne in one ride** (`--ride-together BS,BL,JU,SO,BE`, on by default;
+  `--ride-together ''` or the web checkbox turns it off): these five cantons only count when all
+  are stepped on during a single ride (board, hop off/on, alight; staying seated onto the next
+  trip counts as the same ride), i.e. the IR56 via Laufen, Delémont, Moutier and Grenchen Nord.
+  Every good route takes this train anyway. Without the rule, the beam rewards picking up Bern or
+  Solothurn elsewhere and wastes room on such labels. With it, the five cantons are worth
+  nothing until that ride, then all count at once. The lower bounds still assume each canton can
+  be reached anywhere, so they stay valid. The itinerary lists the five where the ride completes
+  them. Genève 05:00, 14 Nov, beam 8,32,128, one start time: arrival 23:58 → 22:42.
 
 **Change times:** 1 minute for every transfer, big stations included: 60 s to change at the
 same stop (`--default-change`), and 60 s for every transfer SBB lists, between platforms
@@ -118,7 +127,7 @@ doesn't list as transfers (and bike legs) are timed by distance. `./sbb day <dat
 off (or hopping off) there, or arriving on foot if the last canton is reached by walking.
 Waiting or walking before the first vehicle doesn't count. Since an earlier train plus a
 wait elsewhere can arrive just as late, the solver also **refines** the start: it retries
-every minute after the chosen first departure (30 min by default; up to the next swept start
+every minute after the chosen first departure (60 min by default; up to the next swept start
 with `--sweep-end`) and keeps the shortest trip. Example: Genève, 14 Nov: the 05:06 departure
 → 19h27 becomes the 05:24 departure → 19h09, with the same arrival.
 

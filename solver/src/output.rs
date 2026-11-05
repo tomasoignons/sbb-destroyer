@@ -56,12 +56,18 @@ pub fn legs(tt: &Timetable, sol: &Solution, min_dwell: u32, rules: &Rules) -> Ve
     let mut mask = rules.initial;
     let mut out = vec![];
     // replay the solver's mask updates to find where each canton / via station was reached
-    let gain = |mask: &mut u32, stop: u32, time: u32, how: &'static str, gains: &mut Vec<Gain>| {
-        let new = rules.adv(tt, *mask, stop);
+    // `ride`: ride-group cantons seen on the current ride (None when not on a vehicle)
+    let gain = |mask: &mut u32, ride: Option<&mut u32>, stop: u32, time: u32, how: &'static str, gains: &mut Vec<Gain>| {
+        let mut new = rules.adv(tt, *mask, stop);
+        if let Some(r) = ride {
+            *r |= rules.ride_bit(tt, stop);
+            new = rules.ride_done(tt, new, *r, stop);
+        }
         let diff = new & !*mask;
         *mask = new;
         for c in 0..26u8 {
             if diff & (1 << c) != 0 {
+                let how = if rules.ride_group & (1 << c) != 0 { "all on one ride, completed" } else { how };
                 gains.push(Gain { canton: c, via: None, stop, time, how });
             }
         }
@@ -75,11 +81,12 @@ pub fn legs(tt: &Timetable, sol: &Solution, min_dwell: u32, rules: &Rules) -> Ve
         }
     };
     let mut prev_time = 0;
+    let mut ride = 0u32; // carried over while staying seated onto the next trip
     for n in &sol.path {
         match n.kind {
             Kind::Start => {
                 let mut g = vec![];
-                gain(&mut mask, n.a, n.time, "start", &mut g);
+                gain(&mut mask, None, n.a, n.time, "start", &mut g);
                 out.push(Leg {
                     kind: "start",
                     trip: NONE,
@@ -95,7 +102,7 @@ pub fn legs(tt: &Timetable, sol: &Solution, min_dwell: u32, rules: &Rules) -> Ve
             Kind::Walk => {
                 let bike = tt.link_kind(n.a, n.b) == 1;
                 let mut g = vec![];
-                gain(&mut mask, n.b, n.time, if bike { "bike" } else { "walk" }, &mut g);
+                gain(&mut mask, None, n.b, n.time, if bike { "bike" } else { "walk" }, &mut g);
                 out.push(Leg {
                     kind: if bike { "bike" } else { "walk" },
                     trip: NONE,
@@ -118,7 +125,7 @@ pub fn legs(tt: &Timetable, sol: &Solution, min_dwell: u32, rules: &Rules) -> Ve
                         g.push(Gain { canton: c, via: None, stop: n.a, time: n.time, how: "run" });
                     }
                 }
-                gain(&mut mask, n.a, n.time, "run", &mut g); // may complete -> end station
+                gain(&mut mask, None, n.a, n.time, "run", &mut g); // may complete -> end station
                 out.push(Leg {
                     kind: "run",
                     trip: NONE,
@@ -144,15 +151,18 @@ pub fn legs(tt: &Timetable, sol: &Solution, min_dwell: u32, rules: &Rules) -> Ve
                     .unwrap_or(0);
                 let mut g = vec![];
                 let mut path = vec![(bstop, btime)];
-                gain(&mut mask, bstop, btime, "board", &mut g);
+                if !cont {
+                    ride = 0;
+                }
+                gain(&mut mask, Some(&mut ride), bstop, btime, "board", &mut g);
                 for &c in &conns[start..] {
                     path.push((tt.to[c], tt.arr[c]));
                     if c == alight {
-                        gain(&mut mask, tt.to[c], tt.arr[c], "alight", &mut g);
+                        gain(&mut mask, Some(&mut ride), tt.to[c], tt.arr[c], "alight", &mut g);
                         break;
                     }
                     if tt.flags[c] & F_HALT != 0 && tt.dwell[c] >= min_dwell {
-                        gain(&mut mask, tt.to[c], tt.arr[c], "hop off/on", &mut g);
+                        gain(&mut mask, Some(&mut ride), tt.to[c], tt.arr[c], "hop off/on", &mut g);
                     }
                     // bonus station: run across the border while the train waits long enough
                     if tt.flags[c] & F_HALT != 0 {
@@ -171,7 +181,7 @@ pub fn legs(tt: &Timetable, sol: &Solution, min_dwell: u32, rules: &Rules) -> Ve
                                     }
                                 }
                                 if tt.dwell[c] >= min_dwell {
-                                    gain(&mut mask, tt.to[c], tt.arr[c], "hop off/on", &mut g); // end station
+                                    gain(&mut mask, Some(&mut ride), tt.to[c], tt.arr[c], "hop off/on", &mut g); // end station
                                 }
                             }
                         }

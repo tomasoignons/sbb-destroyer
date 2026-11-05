@@ -240,6 +240,8 @@ def cmd_route(a):
         cmd += ["--have", a.have]
     if a.skip:
         cmd += ["--skip", a.skip]
+    if a.ride_together:
+        cmd += ["--ride-together", a.ride_together]
     if a.upper_bound:
         cmd += ["--upper-bound", a.upper_bound]
     json_path = Path(a.json).resolve() if a.json else None
@@ -351,6 +353,10 @@ def build_parser():
                    help="ignore bonus_stations.tsv (Ziegelbrücke → Glarus, Rorschach → Thurgau, …)")
     s.add_argument("--have", metavar="CANTONS",
                    help="cantons already validated (optimise part of the trip), e.g. \"GE,VD,NE\"")
+    s.add_argument("--ride-together", metavar="CANTONS", default="BS,BL,JU,SO,BE",
+                   help="these cantons only count when all are stepped on during ONE ride: forces the "
+                        "Basel SBB ↔ Biel/Bienne train, and the search stops chasing them one by one "
+                        "('' = off)")
     s.add_argument("--skip", help="comma-separated cantons not required, e.g. \"Ticino,Valais\"")
     s.add_argument("--upper-bound", type=hhmm, help="known arrival HH:MM to prune with")
     s.add_argument("-j", "--json", help="write the itinerary as JSON to this file")

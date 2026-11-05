@@ -119,6 +119,12 @@ struct Args {
     #[arg(long, default_value = "")]
     have: String,
 
+    /// cantons that only count when all are stepped on during one single ride
+    /// (comma-separated names or codes), e.g. "BS,BL,JU,SO,BE" = the Basel SBB ↔
+    /// Biel/Bienne train. Forces that ride; the beam then doesn't chase them one by one.
+    #[arg(long, default_value = "")]
+    ride_together: String,
+
     /// comma-separated canton names NOT required (for experiments)
     #[arg(long, default_value = "")]
     skip: String,
@@ -126,7 +132,7 @@ struct Args {
     /// after the search, also try later start times (1-min steps) for up to this many
     /// minutes after the chosen first departure — a later start can mean a shorter trip
     /// (0 = off). With --sweep-end, refines up to the next swept start time instead.
-    #[arg(long, default_value_t = 30)]
+    #[arg(long, default_value_t = 60)]
     refine: u32,
 
     /// worker threads for parallel start times (default: all cores). Each concurrent
@@ -171,6 +177,48 @@ fn canton_index(tt: &Timetable, name: &str) -> usize {
         eprintln!("unknown canton {name:?}; use a code ({}) or one of: {}", CODES.join(" "), tt.canton_names.join(", "));
         std::process::exit(1);
     })
+}
+
+/// Sorted times `t` at which starting at `t` makes a new first boarding possible: a
+/// departure at a start stop, or one at a stop reachable on foot / by bike from a start
+/// stop (departure minus the link time). Between two consecutive such times, a later
+/// start lets nothing new happen first, so it gives the same search.
+fn first_boarding_times(tt: &Timetable, start_stops: &[u32], walking: bool, bike: bool) -> Vec<u32> {
+    // per stop: smallest offset (link time) from any start stop, u32::MAX = unreachable
+    let mut off = vec![u32::MAX; tt.n_stops()];
+    for &st in start_stops {
+        off[st as usize] = 0;
+        if walking {
+            for (w, d, kind) in tt.footpaths(st) {
+                if kind == 1 && !bike {
+                    continue;
+                }
+                off[w as usize] = off[w as usize].min(d);
+            }
+        }
+    }
+    let mut times: Vec<u32> = (0..tt.n_conns())
+        .filter(|&c| tt.flags[c] & data::F_BOARD != 0)
+        .filter_map(|c| {
+            let o = off[tt.from[c] as usize];
+            (o != u32::MAX).then(|| tt.dep[c].saturating_sub(o))
+        })
+        .collect();
+    times.sort_unstable();
+    times.dedup();
+    times
+}
+
+/// Start minutes in `lo..=hi` (1-min steps) that differ from the minute before: some first
+/// boarding becomes impossible between them (see `first_boarding_times`).
+fn distinct_minutes(times: &[u32], lo: u32, hi: u32) -> Vec<u32> {
+    (lo..=hi)
+        .step_by(60)
+        .filter(|&m| {
+            let i = times.partition_point(|&t| t < m.saturating_sub(60));
+            i < times.len() && times[i] < m
+        })
+        .collect()
 }
 
 fn parse_hm(s: &str) -> u32 {
@@ -228,6 +276,13 @@ fn main() {
     // ---- via stations + bonus stations
     let mut rules = Rules::new(tt.n_stops());
     rules.initial = initial;
+    for name in args.ride_together.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        rules.ride_group |= 1 << canton_index(&tt, name);
+    }
+    rules.ride_group &= required & !initial; // nothing to force if already validated / not needed
+    if rules.ride_group != 0 {
+        eprintln!("one ride must step into all of: {}", args.ride_together);
+    }
     if initial != 0 {
         eprintln!("already validated: {} canton(s), {} to go", initial.count_ones(), 26 - initial.count_ones());
     }
@@ -358,16 +413,41 @@ fn main() {
     eprintln!("lower bounds computed in {:.1}s", t1.elapsed().as_secs_f64());
 
     let sweep_step = args.sweep_step.max(1) * 60;
-    let starts: Vec<u32> = match &args.sweep_end {
+    let mut starts: Vec<u32> = match &args.sweep_end {
         None => vec![base.start_time],
         Some(e) => (base.start_time..=parse_hm(e)).step_by(sweep_step as usize).collect(),
     };
-    let verbose = starts.len() == 1;
+    let s0 = base.start_time;
+    let boardings = first_boarding_times(&tt, &base.start_stops, base.walking, base.bike);
+
+    // Single start time + refine: rather than run the main search alone on one core and only
+    // then the refine starts, estimate the first departure with a quick narrow pass and run
+    // the likely refine starts in parallel with the main search. The refine step below
+    // still fills in whatever the estimate missed.
+    if args.refine > 0 && args.sweep_end.is_none() && !(args.via_first && !rules.via_names.is_empty()) {
+        let k = args.beams[0];
+        let quick = solve(&tt, &bounds, &Params { beam_stop: k, beam_trip: k, ..base.clone() });
+        if quick.complete {
+            let d0 = quick.first_departure(&tt);
+            let spec = distinct_minutes(&boardings, d0 + 60, d0 + args.refine * 60 - 1);
+            eprintln!(
+                "quick pass (beam {k}): first departure {} → {} start times in parallel ({:.1}s)",
+                fmt_time(d0),
+                spec.len() + 1,
+                quick.stats.millis as f64 / 1000.0
+            );
+            starts.extend(spec);
+        }
+    }
+    // per-beam details for a lone start time, or for the requested one next to the refine starts
+    let solo = starts.len() == 1;
+    let verbose_for = |s: u32| solo || (args.sweep_end.is_none() && s == s0);
 
     // one start time: successive beams, each pruned by the best arrival so far
     let done = AtomicUsize::new(0);
     let total = AtomicUsize::new(starts.len());
     let beam_solve = |mut p: Params| -> Solution {
+        let verbose = verbose_for(p.start_time);
         let mut best: Option<Solution> = None;
         for &k in &args.beams {
             p.beam_stop = k;
@@ -478,18 +558,32 @@ fn main() {
 
     // refine: starting later than the chosen first departure can only shorten the trip
     // (no idle time before boarding); try every minute until the next swept start time
+    // (no idle time before boarding); try every minute until the next swept start time.
+    // Without a sweep, refine after the requested start's own result (the extra starts
+    // run above are only there to keep the cores busy). Minutes that make no new first
+    // boarding possible give the same search as the minute before and are skipped.
     if args.refine > 0 {
-        let (s0, r0) = results.iter().max_by_key(|(_, r)| rank(r)).unwrap();
+        let (sa, r0) = if args.sweep_end.is_some() {
+            results.iter().max_by_key(|(_, r)| rank(r)).unwrap()
+        } else {
+            results.iter().find(|(x, _)| *x == s0).unwrap()
+        };
         if r0.complete {
             let d = r0.first_departure(&tt);
-            let until = if args.sweep_end.is_some() { s0 + sweep_step } else { d + args.refine * 60 };
-            let fine: Vec<u32> = (d + 60..until)
-                .step_by(60)
+            let until = if args.sweep_end.is_some() { sa + sweep_step } else { d + args.refine * 60 };
+            let all = (d + 60..until).step_by(60).count();
+            let fine: Vec<u32> = distinct_minutes(&boardings, d + 60, until.saturating_sub(1))
+                .into_iter()
                 .filter(|s| !results.iter().any(|(x, _)| x == s))
                 .collect();
             if !fine.is_empty() {
                 total.fetch_add(fine.len(), Ordering::Relaxed);
-                eprintln!("phase refine: {} later start times after {}", fine.len(), fmt_time(d));
+                eprintln!(
+                    "phase refine: {} later start times after {} ({} already done or nothing new departs)",
+                    fine.len(),
+                    fmt_time(d),
+                    all - fine.len()
+                );
                 results.extend(fine.par_iter().map(|&s| run_start(s)).collect::<Vec<_>>());
             }
         }

@@ -34,11 +34,11 @@ DAYS = ROOT / "data" / "days"
 SHAPES = ROOT / "data" / "parquet" / "cantons.geojson"
 SBB = ROOT / "sbb"
 
-# beams per quality preset, and rough RAM per concurrent search (GB) to size threads
+# beams per quality preset, and peak RAM per concurrent search (GB, measured + margin) to size threads
 QUALITY = {
-    "quick":  {"beams": "8,32",          "gb": 0.8, "label": "Quick",  "hint": "~15 s per start time"},
-    "better": {"beams": "8,32,128",      "gb": 2.5, "label": "Better", "hint": "~1 min per start time"},
-    "best":   {"beams": "8,32,128,512",  "gb": 7.0, "label": "Best",   "hint": "~8 min per start time, lots of RAM"},
+    "quick":  {"beams": "8,32",          "gb": 0.6, "label": "Quick",  "hint": "~15 s per start time"},
+    "better": {"beams": "8,32,128",      "gb": 1.6, "label": "Better", "hint": "~1 min per start time"},
+    "best":   {"beams": "8,32,128,512",  "gb": 5.5, "label": "Best",   "hint": "~10 min per start time, lots of RAM"},
 }
 # official codes in KANTONSNUMMER order, with display names
 CANTON_CODES = ["ZH", "BE", "LU", "UR", "SZ", "OW", "NW", "GL", "ZG", "FR", "SO", "BS", "BL", "SH", "AR", "AI",
@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS routes (
     via TEXT,                           -- JSON list of station names, in order
     bonus INTEGER NOT NULL DEFAULT 1,
     detour INTEGER NOT NULL DEFAULT 1,
+    ride INTEGER NOT NULL DEFAULT 1,
     have TEXT,                          -- JSON list of cantons already validated
     via_first INTEGER NOT NULL DEFAULT 0,
     end_station TEXT,
@@ -74,7 +75,7 @@ CREATE TABLE IF NOT EXISTS routes (
     log TEXT
 );
 """
-LIST_COLS = ("id, created, station, date, start, sweep_end, quality, min_dwell, walk, bike, via, via_first, end_station, bonus, detour, have, note, status, message, "
+LIST_COLS = ("id, created, station, date, start, sweep_end, quality, min_dwell, walk, bike, via, via_first, end_station, bonus, detour, ride, have, note, status, message, "
              "progress_done, progress_total, started, finished, duration_s, first_departure, arrival, cantons, complete")
 
 
@@ -99,6 +100,8 @@ def init_db():
             con.execute("ALTER TABLE routes ADD COLUMN bonus INTEGER NOT NULL DEFAULT 0")
         if "detour" not in cols:
             con.execute("ALTER TABLE routes ADD COLUMN detour INTEGER NOT NULL DEFAULT 0")
+        if "ride" not in cols:  # routes computed before the option existed didn't force the ride
+            con.execute("ALTER TABLE routes ADD COLUMN ride INTEGER NOT NULL DEFAULT 0")
         if "have" not in cols:
             con.execute("ALTER TABLE routes ADD COLUMN have TEXT")
         if "via_first" not in cols:
@@ -270,6 +273,8 @@ class Worker(threading.Thread):
             cmd.append("--no-bonus")
         if not job["detour"]:
             cmd.append("--no-detour")
+        if not job["ride"]:
+            cmd += ["--ride-together", ""]
         have = json.loads(job["have"] or "[]")
         if have:
             cmd += ["--have", ",".join(have)]
@@ -484,6 +489,7 @@ class Api(BaseHTTPRequestHandler):
         bike = 1 if (walk and b.get("bike", True)) else 0
         bonus = 1 if b.get("bonus", True) else 0
         detour = 1 if b.get("detour", True) else 0
+        ride = 1 if b.get("ride", True) else 0
         via_first = 1 if b.get("via_first", False) else 0
         end_station = None
         if str(b.get("end_station") or "").strip():
@@ -508,11 +514,11 @@ class Api(BaseHTTPRequestHandler):
         with db() as con:
             cur = con.execute(
                 "INSERT INTO routes (created, station, date, start, sweep_end, quality, min_dwell, walk, bike, via,"
-                " via_first, end_station, bonus, detour, have, note, status, message)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'queued', 'waiting in queue')",
+                " via_first, end_station, bonus, detour, ride, have, note, status, message)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'queued', 'waiting in queue')",
                 (dt.datetime.now().isoformat(timespec="seconds"), station, date.isoformat(), start, sweep_end,
                  quality, min_dwell, walk, bike, json.dumps(via, ensure_ascii=False), via_first, end_station, bonus,
-                 detour, json.dumps(sorted(set(have), key=CANTON_CODES.index)), str(b.get("note", ""))[:200]))
+                 detour, ride, json.dumps(sorted(set(have), key=CANTON_CODES.index)), str(b.get("note", ""))[:200]))
             rid = cur.lastrowid
         self.worker.kick()
         self.send_json({"id": rid}, 201)

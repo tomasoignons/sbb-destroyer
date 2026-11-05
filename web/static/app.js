@@ -136,7 +136,7 @@
       station: st.value.trim(), date: dateIn.value, start: $("#start").value,
       sweep_end: $("#sweep_end").value || null, quality: $("input[name=quality]:checked").value,
       min_dwell: +$("#min_dwell").value || 0, walk: $("#walk").checked, bike: $("#bike").checked,
-      via, via_first: $("#via_first").checked, end_station: endIn.value.trim() || null, bonus: $("#bonus").checked, detour: $("#detour").checked, have: getHave(),
+      via, via_first: $("#via_first").checked, end_station: endIn.value.trim() || null, bonus: $("#bonus").checked, detour: $("#detour").checked, ride: $("#ride").checked, have: getHave(),
       note: $("#note").value.trim(),
     };
     if (!body.station) return formErr("Enter a start station.");
@@ -271,6 +271,7 @@
     $("#min_dwell").value = d.min_dwell; $("#walk").checked = !!d.walk; $("#bike").checked = !!d.bike;
     $("#bonus").checked = !!d.bonus;
     $("#detour").checked = !!d.detour;
+    $("#ride").checked = !!d.ride;
     setHave(JSON.parse(d.have || "[]"));
     via = JSON.parse(d.via || "[]"); renderVia();
     $("#via_first").checked = !!d.via_first;

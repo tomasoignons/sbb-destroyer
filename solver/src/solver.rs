@@ -59,6 +59,47 @@ pub struct Node {
     pub time: u32,
 }
 
+/// `Node` packed into 16 bytes (instead of 20) for the search's node arena, which holds
+/// up to hundreds of millions of entries: `kind` lives in the top 2 bits of `b`
+/// (b is a stop, a connection or a canton mask, all < 2^30).
+#[derive(Clone, Copy)]
+struct PNode {
+    parent: u32,
+    a: u32,
+    kb: u32,
+    time: u32,
+}
+
+const KIND_SHIFT: u32 = 30;
+const B_MASK: u32 = (1 << KIND_SHIFT) - 1;
+
+impl From<Node> for PNode {
+    #[inline]
+    fn from(n: Node) -> PNode {
+        debug_assert!(n.b <= B_MASK);
+        let k = match n.kind {
+            Kind::Start => 0,
+            Kind::Ride => 1,
+            Kind::Walk => 2,
+            Kind::Run => 3,
+        };
+        PNode { parent: n.parent, a: n.a, kb: (k << KIND_SHIFT) | n.b, time: n.time }
+    }
+}
+
+impl From<PNode> for Node {
+    #[inline]
+    fn from(p: PNode) -> Node {
+        let kind = match p.kb >> KIND_SHIFT {
+            0 => Kind::Start,
+            1 => Kind::Ride,
+            2 => Kind::Walk,
+            _ => Kind::Run,
+        };
+        Node { parent: p.parent, kind, a: p.a, b: p.kb & B_MASK, time: p.time }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct StopLabel {
     mask: u32,
@@ -93,6 +134,8 @@ struct TripLabel {
     board: u32,
     /// cantons that must be reached before getting off (detour rules), 0 = none
     need: u32,
+    /// ride-group cantons stepped on during this ride (see `Rules::ride_group`)
+    ride: u32,
 }
 
 impl TripLabel {
@@ -102,10 +145,19 @@ impl TripLabel {
         self.need & !self.mask
     }
 
-    /// `self` is at least as good as `o`: more cantons and no more obligations
+    /// ride-group progress (the group's cantons already in the mask count as seen)
+    #[inline]
+    fn ride_seen(&self) -> u32 {
+        self.ride | self.mask
+    }
+
+    /// `self` is at least as good as `o`: more cantons, more ride-group progress and no
+    /// more obligations
     #[inline]
     fn dominates(&self, o: &TripLabel) -> bool {
-        (self.mask & o.mask) == o.mask && (self.open_need() & !o.open_need()) == 0
+        (self.mask & o.mask) == o.mask
+            && (self.ride_seen() & o.ride_seen()) == o.ride_seen()
+            && (self.open_need() & !o.open_need()) == 0
     }
 }
 
@@ -139,6 +191,10 @@ pub struct Rules {
     /// detour rules, per stop: "if you are here without these cantons, go get them first"
     /// (e.g. Lausanne / Renens VD -> Genève). 0 = no rule.
     pub detour_of_stop: Vec<u32>,
+    /// cantons that only count when all of them are stepped on during one single ride
+    /// (e.g. BS, BL, JU, SO, BE: the Basel SBB ↔ Biel/Bienne train). Stepping on one of
+    /// them elsewhere adds nothing, so the beam doesn't chase them one by one. 0 = off.
+    pub ride_group: u32,
 }
 
 impl Rules {
@@ -164,7 +220,7 @@ impl Rules {
     /// Mask after stepping on `stop`: its canton, plus via progress if it is the next via station.
     #[inline]
     pub fn adv(&self, tt: &Timetable, mask: u32, stop: u32) -> u32 {
-        let mut m = mask | tt.bit(stop);
+        let mut m = mask | (tt.bit(stop) & !self.ride_group);
         let w = self.via_of_stop[stop as usize];
         if w != 0 {
             let mut k = (m >> VIA_SHIFT).trailing_ones();
@@ -181,6 +237,24 @@ impl Rules {
             }
         }
         m
+    }
+
+    /// Ride-group cantons of `stop` (0 if none / feature off).
+    #[inline]
+    pub fn ride_bit(&self, tt: &Timetable, stop: u32) -> u32 {
+        tt.bit(stop) & self.ride_group
+    }
+
+    /// `mask` plus the whole ride group if `ride` (with `mask`) now covers it, then the
+    /// end-station check again (completing the group may complete everything).
+    #[inline]
+    pub fn ride_done(&self, tt: &Timetable, mask: u32, ride: u32, stop: u32) -> u32 {
+        let g = self.ride_group;
+        if g != 0 && mask & g != g && (ride | mask) & g == g {
+            self.adv(tt, mask | g, stop)
+        } else {
+            mask
+        }
     }
 
     /// Bits a complete solution must have: cantons, via stations, end station.
@@ -344,7 +418,7 @@ struct Search<'a> {
     p: &'a Params,
     rules: &'a Rules,
     req: u32,
-    nodes: Vec<Node>,
+    nodes: Vec<PNode>,
     stop_sets: Vec<Vec<StopLabel>>,
     best: Best,
     /// best partial result (most bits, then earliest), reported if no full solution exists
@@ -402,7 +476,7 @@ impl<'a> Search<'a> {
             return (None, false);
         }
         let idx = self.nodes.len() as u32;
-        self.nodes.push(node);
+        self.nodes.push(node.into());
         self.consider(mask, time, idx);
         if let Some(i) = ins {
             self.stop_sets[stop as usize][i].node = idx;
@@ -448,7 +522,7 @@ impl<'a> Search<'a> {
                 let parent = match pushed {
                     Some(i) => i,
                     None => {
-                        self.nodes.push(node);
+                        self.nodes.push(node.into());
                         self.nodes.len() as u32 - 1
                     }
                 };
@@ -516,7 +590,7 @@ pub fn solve(tt: &Timetable, bounds: &Bounds, p: &Params) -> Solution {
                     }
                     insert_trip(
                         &mut trip_sets[t],
-                        TripLabel { mask: m, parent: sl.node, board: c as u32, need },
+                        TripLabel { mask: m, parent: sl.node, board: c as u32, need, ride: rules.ride_bit(tt, u) },
                         p.beam_trip,
                         tkey,
                     );
@@ -533,7 +607,7 @@ pub fn solve(tt: &Timetable, bounds: &Bounds, p: &Params) -> Solution {
             let change = tt.stop_change[v as usize];
             for k in 0..trip_sets[t].len() {
                 let tl = trip_sets[t][k];
-                let m = rules.adv(tt, tl.mask, v);
+                let m = rules.ride_done(tt, rules.adv(tt, tl.mask, v), tl.ride | rules.ride_bit(tt, v), v);
                 let node = Node { parent: tl.parent, kind: Kind::Ride, a: tl.board, b: c as u32, time: arr };
                 if tl.need & !m != 0 {
                     // detour rule: not allowed off before the obliged canton, except for a
@@ -561,10 +635,14 @@ pub fn solve(tt: &Timetable, bounds: &Bounds, p: &Params) -> Solution {
             if hop || extra != 0 {
                 let set = &mut trip_sets[t];
                 let mut changed = false;
+                let rb = if hop { rules.ride_bit(tt, v) } else { 0 };
                 for l in set.iter_mut() {
                     let m = if hop { rules.adv(tt, l.mask | extra, v) } else { l.mask | extra };
-                    changed |= m != l.mask;
+                    let r = l.ride | rb;
+                    let m = rules.ride_done(tt, m, r, v);
+                    changed |= m != l.mask || r != l.ride;
                     l.mask = m;
+                    l.ride = r;
                 }
                 if changed {
                     prune_trip(set);
@@ -580,11 +658,12 @@ pub fn solve(tt: &Timetable, bounds: &Bounds, p: &Params) -> Solution {
             for tl in tmp.iter() {
                 // materialise the ride so far as a node; the next trip "boards" at v
                 let node = s.nodes.len() as u32;
-                s.nodes.push(Node { parent: tl.parent, kind: Kind::Ride, a: tl.board, b: c as u32, time: arr });
-                let m = rules.adv(tt, tl.mask, v);
+                s.nodes.push(Node { parent: tl.parent, kind: Kind::Ride, a: tl.board, b: c as u32, time: arr }.into());
+                let r = tl.ride | rules.ride_bit(tt, v);
+                let m = rules.ride_done(tt, rules.adv(tt, tl.mask, v), r, v);
                 insert_trip(
                     &mut trip_sets[nt as usize],
-                    TripLabel { mask: m, parent: node, board: CONT_BIT | c as u32, need: tl.need },
+                    TripLabel { mask: m, parent: node, board: CONT_BIT | c as u32, need: tl.need, ride: r },
                     p.beam_trip,
                     |mm| s.key(mm, v, arr).unwrap_or(u64::MAX),
                 );
@@ -600,8 +679,9 @@ pub fn solve(tt: &Timetable, bounds: &Bounds, p: &Params) -> Solution {
     let mut path = vec![];
     let mut n = end.node;
     while n != NONE {
-        path.push(s.nodes[n as usize]);
-        n = s.nodes[n as usize].parent;
+        let node: Node = s.nodes[n as usize].into();
+        path.push(node);
+        n = node.parent;
     }
     path.reverse();
     Solution {
