@@ -1,0 +1,7 @@
+# Bike excursions: get off at <from>, cycle through the listed canton(s), arrive at <to>
+# <minutes> later. A 5th column "tight" puts it under the "Tight tricks" switch
+# (web form; CLI: --no-tight) instead of the run-for-it one.
+#
+# from (exact name)<TAB>to (exact name)<TAB>minutes<TAB>cantons (comma-separated)[<TAB>tight]
+Hundwil, Sonderau	Herisau	35	Appenzell Innerrhoden	tight
+Hundwil, Sonderau	St. Gallen	27	Appenzell Innerrhoden	tight

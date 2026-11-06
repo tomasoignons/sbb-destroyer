@@ -8,7 +8,7 @@
 //! the first vehicle instead).
 
 use crate::data::*;
-use crate::solver::{Kind, Node, Rules, Solution, CONT_BIT};
+use crate::solver::{Kind, Node, Rules, Solution, CONT_BIT, EXCURSION_FLAG};
 
 const INF: u32 = u32::MAX;
 
@@ -80,6 +80,7 @@ fn path_mask(tt: &Timetable, path: &[Node], rules: &Rules) -> u32 {
     let mut m = rules.initial;
     for n in path {
         let stops: [u32; 2] = match n.kind {
+            Kind::Run if n.b & EXCURSION_FLAG != 0 => [n.a, rules.excursions[(n.b & !EXCURSION_FLAG) as usize].to],
             Kind::Start | Kind::Run => [n.a, n.a],
             Kind::Walk => [n.b, n.b],
             Kind::Ride => {

@@ -115,6 +115,30 @@ pub fn legs(tt: &Timetable, sol: &Solution, min_dwell: u32, rules: &Rules) -> Ve
                     path: vec![(n.a, prev_time), (n.b, n.time)],
                 });
             }
+            Kind::Run if n.b & EXCURSION_FLAG != 0 => {
+                // bike excursion: get off at n.a, cycle through the cantons, arrive at x.to
+                let x = &rules.excursions[(n.b & !EXCURSION_FLAG) as usize];
+                let mut g = vec![];
+                for c in 0..26u8 {
+                    let b = 1u32 << c;
+                    if x.cantons & b != 0 && mask & b == 0 {
+                        mask |= b;
+                        g.push(Gain { canton: c, via: None, stop: x.to, time: n.time, how: "bike excursion" });
+                    }
+                }
+                gain(&mut mask, None, x.to, n.time, "bike excursion", &mut g);
+                out.push(Leg {
+                    kind: "excursion",
+                    trip: NONE,
+                    from: n.a,
+                    to: x.to,
+                    dep: prev_time,
+                    arr: n.time,
+                    stayed_seated: false,
+                    gains: g,
+                    path: vec![(n.a, prev_time), (x.to, n.time)],
+                });
+            }
             Kind::Run => {
                 // run out of a bonus station into the neighbouring canton(s) and back, or
                 // (FINISH_FLAG) one way to the last canton(s) at the end of the trip
@@ -271,6 +295,20 @@ pub fn print_itinerary(tt: &Timetable, sol: &Solution, min_dwell: u32, rules: &R
                 );
                 gain_lines(l, &mut count);
             }
+            "excursion" => {
+                i += 1;
+                println!(
+                    "{i:3}. {} → {}  BIKE EXCURSION  {} → {} via {} ({} min)",
+                    fmt_time(l.dep),
+                    fmt_time(l.arr),
+                    tt.stop_name[l.from as usize],
+                    tt.stop_name[l.to as usize],
+                    l.gains.iter().filter(|g| g.via.is_none()).map(|g| tt.canton_names[g.canton as usize].as_str())
+                        .collect::<Vec<_>>().join(", "),
+                    (l.arr - l.dep + 59) / 60
+                );
+                gain_lines(l, &mut count);
+            }
             "finish" => {
                 i += 1;
                 println!(
@@ -362,7 +400,8 @@ pub fn to_json(tt: &Timetable, sol: &Solution, min_dwell: u32, rules: &Rules) ->
                 })
             };
             json!({
-                "kind": if l.kind == "finish" { "run" } else { l.kind },
+                "kind": match l.kind { "finish" => "run", "excursion" => "bike", k => k },
+                "excursion": l.kind == "excursion",
                 "finish": l.kind == "finish",
                 "from": stop(l.from),
                 "to": stop(l.to),

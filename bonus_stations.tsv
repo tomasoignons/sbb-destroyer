@@ -3,10 +3,16 @@
 #   * the train you are on stops here for >= <minutes> (scheduled stop time), or
 #   * you get off here and leave >= <minutes> later (next vehicle, walk or bike).
 #
-# station (exact name, see `./sbb find`)<TAB>minutes<TAB>cantons (comma-separated)
+# station (exact name, see `./sbb find`)<TAB>minutes<TAB>cantons (comma-separated)[<TAB>tight]
+# "tight": very short connection; the web form shows it as its own checkbox so it can be
+# turned off alone (CLI: --skip-bonus "<station>").
 Ziegelbrücke	1	Glarus
 Rorschach	18	St. Gallen,Thurgau
 Aigle	20	Valais
 Nyon	20	Genève
 Schaffhausen	20	Thurgau,Zürich
 Rotkreuz	13	Aargau
+Wil SG	6	Thurgau
+Bellinzona	40	Graubünden
+Castione-Arbedo	20	Graubünden
+Sternen bei Teufen	8	Appenzell Ausserrhoden,Appenzell Innerrhoden	tight

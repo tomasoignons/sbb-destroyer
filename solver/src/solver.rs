@@ -38,6 +38,8 @@ pub const MAX_VIA: usize = 5;
 pub const END_BIT: u32 = 1 << 31;
 /// in a `Kind::Run` node's `b`: one-way finishing run (see `Rules::finish`), not there-and-back
 pub const FINISH_FLAG: u32 = 1 << 29;
+/// in a `Kind::Run` node's `b`: bike excursion, the low bits are the index into `Rules::excursions`
+pub const EXCURSION_FLAG: u32 = 1 << 28;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -172,6 +174,18 @@ pub struct Bonus {
     pub cantons: u32,
 }
 
+/// Bike excursion: get off at `from`, cycle through `cantons`, arrive at stop `to` `secs`
+/// later (e.g. Hundwil, Sonderau → Appenzell Innerrhoden → Herisau, 35 min).
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub struct Excursion {
+    pub from_name: String,
+    pub to_name: String,
+    pub to: u32,
+    pub secs: u32,
+    pub cantons: u32,
+}
+
 /// Route-shape rules shared by all searches of one run (built once in main).
 #[derive(Clone, Debug, Default)]
 pub struct Rules {
@@ -202,6 +216,9 @@ pub struct Rules {
     /// `secs` later, on foot across the border (e.g. Schaffhausen → Thurgau in 10 min).
     pub finish_of_stop: Vec<u32>,
     pub finish: Vec<Bonus>,
+    /// bike excursions, and per departure stop the indices of those starting there
+    pub excursions: Vec<Excursion>,
+    pub excursions_of_stop: std::collections::HashMap<u32, Vec<u32>>,
 }
 
 impl Rules {
@@ -551,7 +568,7 @@ impl<'a> Search<'a> {
     /// `make_node` is the step that got us here; `pushed` is its index if already created.
     /// `plain = false`: only the bonus run is allowed here (detour obligation still open).
     fn arrive(&mut self, mask: u32, stop: u32, time: u32, change: u32, node: Node, plain: bool) {
-        let (pushed, kept) = if plain {
+        let (mut pushed, kept) = if plain {
             self.reach(mask, stop, time, time + change, node)
         } else {
             // detour obligation still open: a finishing run that completes everything is fine
@@ -568,6 +585,7 @@ impl<'a> Search<'a> {
                     Some(i) => i,
                     None => {
                         self.nodes.push(node.into());
+                        pushed = Some(self.nodes.len() as u32 - 1);
                         self.nodes.len() as u32 - 1
                     }
                 };
@@ -576,6 +594,31 @@ impl<'a> Search<'a> {
                 let (ri, kept_b) = self.reach(mb, stop, tr, time + change.max(b.secs), run);
                 if kept_b {
                     self.relax_links(stop, tr, mb, ri.unwrap());
+                }
+            }
+        }
+        // bike excursions from here (off the vehicle, no detour obligation open). Explicit
+        // tricks: they follow their own switch (tight / run-for-it), not --no-bike / --no-walk.
+        if plain {
+            if let Some(list) = rules.excursions_of_stop.get(&stop) {
+                for &e in list {
+                    let x = &rules.excursions[e as usize];
+                    let (to, tx) = (x.to, time + x.secs);
+                    let mx = rules.adv(self.tt, mask | x.cantons, to);
+                    let parent = match pushed {
+                        Some(i) => i,
+                        None => {
+                            self.nodes.push(node.into());
+                            let i = self.nodes.len() as u32 - 1;
+                            pushed = Some(i);
+                            i
+                        }
+                    };
+                    let run = Node { parent, kind: Kind::Run, a: stop, b: EXCURSION_FLAG | e, time: tx };
+                    let (ri, kept_x) = self.reach(mx, to, tx, tx, run);
+                    if kept_x {
+                        self.relax_links(to, tx, mx, ri.unwrap());
+                    }
                 }
             }
         }

@@ -218,7 +218,7 @@
                   <div class="route">${esc(l.from.name)}: across the border and back</div>`;
         } else if (l.kind === "walk" || l.kind === "bike") {
           const km = l.km != null ? ` · ${l.km.toLocaleString(undefined, { maximumFractionDigits: 1 })} km` : "";
-          what = `<div class="what"><span class="badge"><i></i>${l.kind === "bike" ? "Bike" : "Walk"}${km}</span>
+          what = `<div class="what"><span class="badge"><i></i>${l.excursion ? "Bike excursion" : l.kind === "bike" ? "Bike" : "Walk"}${km}</span>
                     ${i === firstRide && l.kind === "bike" ? `<span class="dir">⏱ trip time starts</span>` : ""}</div>
                   <div class="route">${esc(l.from.name)}<span class="arr">→</span>${esc(l.to.name)}</div>`;
         } else {

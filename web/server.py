@@ -62,6 +62,9 @@ CREATE TABLE IF NOT EXISTS routes (
     bonus INTEGER NOT NULL DEFAULT 1,
     detour INTEGER NOT NULL DEFAULT 1,
     ride INTEGER NOT NULL DEFAULT 1,
+    bonus_skip TEXT NOT NULL DEFAULT '[]',
+    tight INTEGER NOT NULL DEFAULT 1,
+    zero_change INTEGER NOT NULL DEFAULT 0,
     have TEXT,                          -- JSON list of cantons already validated
     via_first INTEGER NOT NULL DEFAULT 0,
     end_station TEXT,
@@ -75,7 +78,7 @@ CREATE TABLE IF NOT EXISTS routes (
     log TEXT
 );
 """
-LIST_COLS = ("id, created, station, date, start, sweep_end, quality, min_dwell, walk, bike, via, via_first, end_station, bonus, detour, ride, have, note, status, message, "
+LIST_COLS = ("id, created, station, date, start, sweep_end, quality, min_dwell, walk, bike, via, via_first, end_station, bonus, detour, ride, bonus_skip, tight, zero_change, have, note, status, message, "
              "progress_done, progress_total, started, finished, duration_s, first_departure, arrival, cantons, complete")
 
 
@@ -104,6 +107,13 @@ def init_db():
             con.execute("ALTER TABLE routes ADD COLUMN ride INTEGER NOT NULL DEFAULT 0")
         if "have" not in cols:
             con.execute("ALTER TABLE routes ADD COLUMN have TEXT")
+        if "bonus_skip" not in cols:  # run-for-it stations left out of the search
+            con.execute("ALTER TABLE routes ADD COLUMN bonus_skip TEXT NOT NULL DEFAULT '[]'")
+        if "tight" not in cols:  # tight tricks (Sternen bei Teufen, …): followed the run-for-it box until now
+            con.execute("ALTER TABLE routes ADD COLUMN tight INTEGER NOT NULL DEFAULT 1")
+            con.execute("UPDATE routes SET tight = bonus")
+        if "zero_change" not in cols:
+            con.execute("ALTER TABLE routes ADD COLUMN zero_change INTEGER NOT NULL DEFAULT 0")
         if "via_first" not in cols:
             con.execute("ALTER TABLE routes ADD COLUMN via_first INTEGER NOT NULL DEFAULT 0")
         if "end_station" not in cols:
@@ -275,6 +285,12 @@ class Worker(threading.Thread):
             cmd.append("--no-detour")
         if not job["ride"]:
             cmd += ["--ride-together", ""]
+        for x in json.loads(job["bonus_skip"] or "[]"):
+            cmd += ["--skip-bonus", x]
+        if not job["tight"]:
+            cmd.append("--no-tight")
+        if job["zero_change"]:
+            cmd.append("--zero-change")
         have = json.loads(job["have"] or "[]")
         if have:
             cmd += ["--have", ",".join(have)]
@@ -404,7 +420,15 @@ class Api(BaseHTTPRequestHandler):
                     for line in f.read_text(encoding="utf-8").splitlines():
                         parts = [x.strip() for x in line.split("\t")]
                         if line.strip() and not line.startswith("#") and len(parts) >= 3:
-                            rows.append({"station": parts[0], "minutes": parts[1], "cantons": parts[2], "finish": finish})
+                            rows.append({"station": parts[0], "minutes": parts[1], "cantons": parts[2], "finish": finish,
+                                         "tight": len(parts) > 3 and parts[3].lower() == "tight"})
+            f = ROOT / "excursions.tsv"  # bike excursions: from, to, minutes, cantons[, tight]
+            if f.exists():
+                for line in f.read_text(encoding="utf-8").splitlines():
+                    parts = [x.strip() for x in line.split("\t")]
+                    if line.strip() and not line.startswith("#") and len(parts) >= 4:
+                        rows.append({"station": parts[0], "to": parts[1], "minutes": parts[2], "cantons": parts[3],
+                                     "excursion": True, "tight": len(parts) > 4 and parts[4].lower() == "tight"})
             return self.send_json(rows)
         if p == "/api/detours":
             rows = []
@@ -491,6 +515,8 @@ class Api(BaseHTTPRequestHandler):
         bonus = 1 if b.get("bonus", True) else 0
         detour = 1 if b.get("detour", True) else 0
         ride = 1 if b.get("ride", True) else 0
+        tight = 1 if b.get("tight", True) else 0
+        zero_change = 1 if b.get("zero_change", False) else 0
         via_first = 1 if b.get("via_first", False) else 0
         end_station = None
         if str(b.get("end_station") or "").strip():
@@ -498,6 +524,9 @@ class Api(BaseHTTPRequestHandler):
             if not end_station:
                 return self.error(400, f"unknown end station {b['end_station']!r}",
                                   suggestions=STATIONS.search(str(b["end_station"]), 5))
+        bonus_skip = b.get("bonus_skip") or []
+        if not isinstance(bonus_skip, list) or any(not isinstance(x, str) or len(x) > 100 for x in bonus_skip):
+            return self.error(400, "invalid list of run-for-it stations to leave out")
         have = b.get("have") or []
         if not isinstance(have, list) or any(c not in CANTON_CODES for c in have):
             return self.error(400, "invalid 'already validated' cantons")
@@ -515,11 +544,11 @@ class Api(BaseHTTPRequestHandler):
         with db() as con:
             cur = con.execute(
                 "INSERT INTO routes (created, station, date, start, sweep_end, quality, min_dwell, walk, bike, via,"
-                " via_first, end_station, bonus, detour, ride, have, note, status, message)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'queued', 'waiting in queue')",
+                " via_first, end_station, bonus, detour, ride, bonus_skip, tight, zero_change, have, note, status, message)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'queued', 'waiting in queue')",
                 (dt.datetime.now().isoformat(timespec="seconds"), station, date.isoformat(), start, sweep_end,
                  quality, min_dwell, walk, bike, json.dumps(via, ensure_ascii=False), via_first, end_station, bonus,
-                 detour, ride, json.dumps(sorted(set(have), key=CANTON_CODES.index)), str(b.get("note", ""))[:200]))
+                 detour, ride, json.dumps(bonus_skip, ensure_ascii=False), tight, zero_change, json.dumps(sorted(set(have), key=CANTON_CODES.index)), str(b.get("note", ""))[:200]))
             rid = cur.lastrowid
         self.worker.kick()
         self.send_json({"id": rid}, 201)

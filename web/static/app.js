@@ -119,9 +119,17 @@
   }).catch(() => {});
 
   // bonus stations description
+  // run-for-it stations + finishing runs (main box), tight tricks (own box)
   api("/api/bonus").then(rows => {
+    const fmtC = r => r.cantons.split(",").map(x => x.trim()).join(" + ");
+    const desc = r => r.excursion
+      ? `${r.station} → bike via ${fmtC(r)} → ${r.to} (${r.minutes} min)`
+      : `${r.station} (≥ ${r.minutes} min) → ${fmtC(r)}`;
+    const tight = rows.filter(r => r.tight);
+    $("#tight-desc").textContent = tight.length ? tight.map(desc).join(" · ") : "none marked \"tight\"";
+    rows = rows.filter(r => !r.tight);
     $("#bonus-desc").textContent = rows.length
-      ? rows.filter(r => !r.finish).map(r => `${r.station} (≥ ${r.minutes} min) → ${r.cantons.split(",").map(x => x.trim()).join(" + ")}`).join(" · ")
+      ? rows.filter(r => !r.finish).map(desc).join(" · ")
         + (rows.some(r => r.finish) ? " · to finish, as the last canton: "
           + rows.filter(r => r.finish).map(r => `${r.station} → ${r.cantons} (${r.minutes} min)`).join(" · ") : "")
       : "none defined in bonus_stations.tsv";
@@ -138,7 +146,7 @@
       station: st.value.trim(), date: dateIn.value, start: $("#start").value,
       sweep_end: $("#sweep_end").value || null, quality: $("input[name=quality]:checked").value,
       min_dwell: +$("#min_dwell").value || 0, walk: $("#walk").checked, bike: $("#bike").checked,
-      via, via_first: $("#via_first").checked, end_station: endIn.value.trim() || null, bonus: $("#bonus").checked, detour: $("#detour").checked, ride: $("#ride").checked, have: getHave(),
+      via, via_first: $("#via_first").checked, end_station: endIn.value.trim() || null, bonus: $("#bonus").checked, tight: $("#tight").checked, detour: $("#detour").checked, ride: $("#ride").checked, zero_change: $("#zero_change").checked, have: getHave(),
       note: $("#note").value.trim(),
     };
     if (!body.station) return formErr("Enter a start station.");
@@ -272,8 +280,10 @@
     const q = document.querySelector(`input[name=quality][value="${d.quality}"]`); if (q) q.checked = true; qHint();
     $("#min_dwell").value = d.min_dwell; $("#walk").checked = !!d.walk; $("#bike").checked = !!d.bike;
     $("#bonus").checked = !!d.bonus;
+    $("#tight").checked = !!d.tight;
     $("#detour").checked = !!d.detour;
     $("#ride").checked = !!d.ride;
+    $("#zero_change").checked = !!d.zero_change;
     setHave(JSON.parse(d.have || "[]"));
     via = JSON.parse(d.via || "[]"); renderVia();
     $("#via_first").checked = !!d.via_first;

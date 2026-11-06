@@ -1,0 +1,6 @@
+# Change-time overrides: minutes needed to change trains at this station (same platform or
+# between its platforms). Everywhere else: 1 min (see README, "Change times").
+#
+# station (exact name, see `./sbb find`)<TAB>minutes
+# Cheyres: single-track crossing, the train waits for the other one to clear the track
+Cheyres	0

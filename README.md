@@ -58,6 +58,32 @@ Set `SBB_PYTHON=/path/to/python` if the `sbb` conda env lives somewhere unusual.
   | Rorschach | 18 min | + St. Gallen, Thurgau |
   | Aigle | 20 min | + Valais |
   | Nyon | 20 min | + Genève |
+  | Schaffhausen | 20 min | + Thurgau, Zürich |
+  | Rotkreuz | 13 min | + Aargau |
+  | Wil SG | 6 min | + Thurgau |
+  | Bellinzona | 40 min | + Graubünden |
+  | Castione-Arbedo | 20 min | + Graubünden |
+  | Sternen bei Teufen | 8 min | + Appenzell Ausserrhoden, Appenzell Innerrhoden (*tight*) |
+
+  A 4th column `tight` marks a very short one. Tight lines go under the **Tight tricks**
+  switch instead (see below). `--skip-bonus "<station>"` leaves out any single one.
+  Genève 05:00, 14 Nov, beam 8,32,128: 16h28 → 16h07 with Sternen bei Teufen.
+* **Bike excursions** (`excursions.tsv`, `from<TAB>to<TAB>minutes<TAB>cantons[<TAB>tight]`): get
+  off at `from`, cycle through the listed canton(s), arrive at `to` that many minutes later. The
+  cantons count on arrival at `to`. Only from a vehicle and with no detour obligation open. They don't depend on
+  the general bike or walking option. Shown as a "Bike excursion" step. The lower bounds treat `from` as already in
+  those cantons, so pruning stays exact.
+
+  | from | to | time | through |
+  |---|---|---|---|
+  | Hundwil, Sonderau | Herisau | 35 min | Appenzell Innerrhoden (*tight*) |
+  | Hundwil, Sonderau | St. Gallen | 27 min | Appenzell Innerrhoden (*tight*) |
+
+  St. Gallen 10:00 → Herisau with only AI missing: 11:18 instead of 11:30 (S21 via Appenzell).
+* **Tight tricks switch** (`--no-tight`, or the web form's "Tight tricks" checkbox, on by
+  default): every line marked `tight` in `bonus_stations.tsv` or `excursions.tsv`, currently
+  Sternen bei Teufen and the Hundwil excursion. It's independent of the run-for-it switch
+  (`--no-bonus`), which covers all other run-for-it stations, finishing runs and excursions.
 
   Getting off shows as a **Run** step in the itinerary. Staying on board shows as "run while
   the train waits" under that ride. The lower bounds treat these stations as already
@@ -72,6 +98,8 @@ Set `SBB_PYTHON=/path/to/python` if the `sbb` conda env lives somewhere unusual.
   | Schaffhausen | 10 min | Thurgau |
   | Aigle | 8 min | Valais |
   | Nyon | 10 min | Genève |
+  | Bellinzona | 20 min | Graubünden |
+  | Castione-Arbedo | 10 min | Graubünden |
 
   Shown as a "Finish run" step. The lower bounds treat these stations as already in that canton,
   so pruning stays exact. `--no-bonus` / the run-for-it checkbox turns these off too. Example:
@@ -115,6 +143,17 @@ same stop (`--default-change`), and 60 s for every transfer SBB lists, between p
 of a station or to a nearby differently named stop (`--platform-change`). Only walks that SBB
 doesn't list as transfers (and bike legs) are timed by distance. `./sbb day <date>
 --sbb-change-times` brings back SBB's official (more conservative) transfer times.
+
+**0-minute transfers everywhere** (`--zero-change`, or the web checkbox, off by default): no
+change time at any stop or between platforms of the same station. Walks to differently named stops
+keep their time. Genève, 14 Nov, beam 8,32,128: 05:00 16h07 → 15h42, 07:00 16h05 → 15h40.
+
+**Per-station overrides** (`change_times.tsv`, `station<TAB>minutes`): the change time at all
+platforms of a station and between them (links to other stops, e.g. bus stops, keep their time).
+**Cheyres = 0 min**: a single-track crossing, so the train waits for the one coming the other way,
+and you can step across. Typical use: Yverdon → Cheyres (Fribourg) and straight back on the
+crossing S30 at :14 / :44, back in Yverdon 22 min later instead of 52. Genève 05:00, 14 Nov,
+beam 8,32,128: 22:42 → 21:34 (16h28).
 
 ### Web app
 

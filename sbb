@@ -232,12 +232,19 @@ def cmd_route(a):
         cmd.append("--no-bonus")
     else:
         cmd += ["--bonus-file", ROOT / "bonus_stations.tsv", "--finish-file", ROOT / "finish_stations.tsv"]
+    cmd += ["--change-file", ROOT / "change_times.tsv", "--excursion-file", ROOT / "excursions.tsv"]
+    if a.zero_change:
+        cmd.append("--zero-change")
+    if a.no_tight:
+        cmd.append("--no-tight")
     if a.no_detour:
         cmd.append("--no-detour")
     else:
         cmd += ["--detour-file", ROOT / "detour_rules.tsv"]
     if a.have:
         cmd += ["--have", a.have]
+    for x in a.skip_bonus or []:
+        cmd += ["--skip-bonus", x]
     if a.skip:
         cmd += ["--skip", a.skip]
     if a.ride_together:
@@ -351,9 +358,19 @@ def build_parser():
                    help="ignore detour_rules.tsv (at Lausanne/Renens without Genève → go to Genève first)")
     s.add_argument("--no-bonus", action="store_true",
                    help="ignore bonus_stations.tsv (Ziegelbrücke → Glarus, Rorschach → Thurgau, …) "
-                        "and finish_stations.tsv (end with a run: Schaffhausen → Thurgau, …)")
+                        "and finish_stations.tsv (end with a run: Schaffhausen → Thurgau, …), "
+                        "except the tight tricks (see --no-tight)")
     s.add_argument("--have", metavar="CANTONS",
                    help="cantons already validated (optimise part of the trip), e.g. \"GE,VD,NE\"")
+    s.add_argument("--zero-change", action="store_true",
+                   help="0-minute transfers: changing at the same stop or between platforms of a "
+                        "station takes no time (default: 1 min)")
+    s.add_argument("--no-tight", action="store_true",
+                   help="leave out the tight tricks (lines marked \"tight\": Sternen bei Teufen, "
+                        "the Hundwil, Sonderau → AI → Herisau bike excursion, …)")
+    s.add_argument("--skip-bonus", action="append", metavar="STATION",
+                   help="leave out this run-for-it station of bonus_stations.tsv (repeatable), "
+                        "e.g. \"Rotkreuz\"")
     s.add_argument("--ride-together", metavar="CANTONS", default="BS,BL,JU,SO,BE",
                    help="these cantons only count when all are stepped on during ONE ride: forces the "
                         "Basel SBB ↔ Biel/Bienne train, and the search stops chasing them one by one "

@@ -9,7 +9,7 @@ use data::Timetable;
 use output::{fmt_dur, fmt_time};
 use rayon::prelude::*;
 use heuristic::Bounds;
-use solver::{solve, Bonus, Evict, Node, Params, Rules, Solution, Stats, MAX_VIA};
+use solver::{solve, Bonus, Evict, Excursion, Node, Params, Rules, Solution, Stats, MAX_VIA};
 use std::sync::Arc;
 use std::cmp::Reverse;
 use std::path::PathBuf;
@@ -102,7 +102,8 @@ struct Args {
     #[arg(long, default_value = "bonus_stations.tsv")]
     bonus_file: PathBuf,
 
-    /// ignore the bonus stations file (and the finish stations file)
+    /// ignore the bonus stations, finish stations and excursions files (except "tight"
+    /// lines: see --no-tight)
     #[arg(long)]
     no_bonus: bool,
 
@@ -110,6 +111,26 @@ struct Args {
     /// when only those cantons are missing -> run across the border, trip ends minutes later)
     #[arg(long, default_value = "finish_stations.tsv")]
     finish_file: PathBuf,
+
+    /// bike excursions: TSV file  from<TAB>to<TAB>minutes<TAB>canton[,canton][<TAB>tight]
+    /// (get off at `from`, cycle through those cantons, arrive at `to` minutes later)
+    #[arg(long, default_value = "excursions.tsv")]
+    excursion_file: PathBuf,
+
+    /// leave out the tight tricks (lines marked "tight" in the bonus / excursions files)
+    #[arg(long)]
+    no_tight: bool,
+
+    /// change-time overrides: TSV file  station<TAB>minutes  (time to change trains at
+    /// this station, same platform or between its platforms; e.g. Cheyres 0 = single-track
+    /// crossing, the train waits for the other one)
+    #[arg(long, default_value = "change_times.tsv")]
+    change_file: PathBuf,
+
+    /// 0-minute transfers everywhere: changing at the same stop or between platforms of the
+    /// same station takes no time (walks to differently named stops keep their time)
+    #[arg(long)]
+    zero_change: bool,
 
     /// detour rules: TSV file  station<TAB>canton[,canton]  ("at this station without these
     /// cantons -> board only trains that still stop there, and get off only once reached")
@@ -124,6 +145,10 @@ struct Args {
     /// codes, e.g. "GE,VD,Neuchâtel"); the search only has to collect the others
     #[arg(long, default_value = "")]
     have: String,
+
+    /// leave out this run-for-it station of the bonus file (repeatable), e.g. a tight one
+    #[arg(long)]
+    skip_bonus: Vec<String>,
 
     /// cantons that only count when all are stepped on during one single ride
     /// (comma-separated names or codes), e.g. "BS,BL,JU,SO,BE" = the Basel SBB ↔
@@ -227,8 +252,97 @@ fn distinct_minutes(times: &[u32], lo: u32, hi: u32) -> Vec<u32> {
         .collect()
 }
 
+/// 0-minute transfers: no change time at any stop, and free links between stops (platforms)
+/// with the same name.
+fn zero_change_times(tt: &mut Timetable) {
+    tt.stop_change.iter_mut().for_each(|c| *c = 0);
+    let mut n = 0;
+    for s in 0..tt.n_stops() {
+        for k in tt.foot_off[s] as usize..tt.foot_off[s + 1] as usize {
+            let w = tt.foot_to[k] as usize;
+            if tt.foot_kind.get(k).copied().unwrap_or(0) == 0 && tt.stop_name[w] == tt.stop_name[s] {
+                tt.foot_dur[k] = 0;
+                n += 1;
+            }
+        }
+    }
+    eprintln!("0-minute transfers: everywhere ({n} platform links)");
+}
+
+/// Change-time overrides (`station<TAB>minutes`): the change time at every platform of the
+/// station, and the platform-to-platform links between them (links to other stops keep
+/// their time).
+fn apply_change_overrides(tt: &mut Timetable, path: &std::path::Path) {
+    let Ok(text) = std::fs::read_to_string(path) else { return };
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+        let f: Vec<&str> = line.split('\t').map(str::trim).collect();
+        let stops = tt.stops_named(f[0]);
+        let mins: Option<f64> = f.get(1).and_then(|m| m.parse().ok());
+        let (Some(mins), false) = (mins, stops.is_empty()) else {
+            eprintln!("change times file: skipping {line:?} (unknown station or bad minutes)");
+            continue;
+        };
+        let secs = (mins * 60.0) as u32;
+        for &s in &stops {
+            tt.stop_change[s as usize] = secs;
+            let (a, b) = (tt.foot_off[s as usize] as usize, tt.foot_off[s as usize + 1] as usize);
+            for k in a..b {
+                if stops.contains(&tt.foot_to[k]) && tt.foot_kind.get(k).copied().unwrap_or(0) == 0 {
+                    tt.foot_dur[k] = secs;
+                }
+            }
+        }
+        eprintln!("change time at {}: {mins} min ({} platform(s))", f[0], stops.len());
+    }
+}
+
+fn parse_cantons(tt: &Timetable, list: &str, what: &str) -> u32 {
+    let mut cantons = 0u32;
+    for cn in list.split(',').map(str::trim) {
+        match tt.canton_names.iter().position(|n| n.eq_ignore_ascii_case(cn)) {
+            Some(c) => cantons |= 1 << c,
+            None => eprintln!("{what} file: unknown canton {cn:?}"),
+        }
+    }
+    cantons
+}
+
+/// Bike excursions file: `from<TAB>to<TAB>minutes<TAB>canton[,canton][<TAB>tight]`.
+/// Returns (from stops, excursion per destination platform, tight).
+fn read_excursions(tt: &Timetable, path: &std::path::Path) -> Vec<(Vec<u32>, Vec<Excursion>, bool)> {
+    let Ok(text) = std::fs::read_to_string(path) else { return vec![] };
+    let mut out = vec![];
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+        let f: Vec<&str> = line.split('\t').map(str::trim).collect();
+        if f.len() < 4 {
+            eprintln!("excursions file: skipping malformed line {line:?}");
+            continue;
+        }
+        let (from, to) = (tt.stops_named(f[0]), tt.stops_named(f[1]));
+        let mins: f64 = f[2].parse().unwrap_or(-1.0);
+        let cantons = parse_cantons(tt, f[3], "excursions");
+        if from.is_empty() || to.is_empty() || mins < 0.0 {
+            eprintln!("excursions file: skipping {line:?} (unknown station or bad minutes)");
+            continue;
+        }
+        let tight = f.get(4).is_some_and(|x| x.eq_ignore_ascii_case("tight"));
+        let xs = to
+            .iter()
+            .map(|&t| Excursion {
+                from_name: f[0].to_owned(),
+                to_name: f[1].to_owned(),
+                to: t,
+                secs: (mins * 60.0) as u32,
+                cantons,
+            })
+            .collect();
+        out.push((from, xs, tight));
+    }
+    out
+}
+
 /// `station<TAB>minutes<TAB>canton[,canton]` lines (bonus / finish stations files).
-fn read_station_file(tt: &Timetable, path: &std::path::Path, what: &str) -> Vec<(Vec<u32>, Bonus)> {
+fn read_station_file(tt: &Timetable, path: &std::path::Path, what: &str) -> Vec<(Vec<u32>, Bonus, bool)> {
     let Ok(text) = std::fs::read_to_string(path) else {
         eprintln!("note: no {what} stations file at {}", path.display());
         return vec![];
@@ -253,7 +367,8 @@ fn read_station_file(tt: &Timetable, path: &std::path::Path, what: &str) -> Vec<
             eprintln!("{what} file: skipping {line:?} (unknown station or no canton)");
             continue;
         }
-        out.push((stops, Bonus { name: f[0].to_owned(), secs: (mins * 60.0) as u32, cantons }));
+        let tight = f.get(3).is_some_and(|x| x.eq_ignore_ascii_case("tight"));
+        out.push((stops, Bonus { name: f[0].to_owned(), secs: (mins * 60.0) as u32, cantons }, tight));
     }
     out
 }
@@ -275,7 +390,11 @@ fn main() {
         rayon::ThreadPoolBuilder::new().num_threads(n.max(1)).build_global().unwrap();
     }
     let t0 = std::time::Instant::now();
-    let tt = Timetable::load(&args.data);
+    let mut tt = Timetable::load(&args.data);
+    apply_change_overrides(&mut tt, &args.change_file);
+    if args.zero_change {
+        zero_change_times(&mut tt);
+    }
     eprintln!(
         "loaded {} connections, {} stops, {} trips in {:.1}s",
         tt.n_conns(),
@@ -364,21 +483,45 @@ fn main() {
             rules.via_names.join(" → ")
         );
     }
-    if !args.no_bonus {
-        for (stops, b) in read_station_file(&tt, &args.bonus_file, "bonus") {
-            eprintln!("bonus: alight at {} and leave ≥ {} min later → +{}", b.name, b.secs / 60, canton_list(&tt, b.cantons));
-            for s in stops {
-                rules.bonus_of_stop[s as usize] = rules.bonus.len() as u32;
-            }
-            rules.bonus.push(b);
+    // tight tricks (4th / 5th column "tight") follow --no-tight, the others --no-bonus
+    let use_line = |tight: bool| if tight { !args.no_tight } else { !args.no_bonus };
+    for (stops, b, tight) in read_station_file(&tt, &args.bonus_file, "bonus") {
+        if !use_line(tight) || args.skip_bonus.iter().any(|x| x.eq_ignore_ascii_case(&b.name)) {
+            eprintln!("bonus: {} left out", b.name);
+            continue;
         }
-        for (stops, f) in read_station_file(&tt, &args.finish_file, "finish") {
-            eprintln!("finish: get off at {} with only {} missing → run there, done {} min later",
-                f.name, canton_list(&tt, f.cantons), f.secs / 60);
-            for s in stops {
-                rules.finish_of_stop[s as usize] = rules.finish.len() as u32;
+        eprintln!("bonus: alight at {} and leave ≥ {} min later → +{}{}", b.name, b.secs / 60,
+            canton_list(&tt, b.cantons), if tight { "  (tight)" } else { "" });
+        for s in stops {
+            rules.bonus_of_stop[s as usize] = rules.bonus.len() as u32;
+        }
+        rules.bonus.push(b);
+    }
+    for (stops, f, tight) in read_station_file(&tt, &args.finish_file, "finish") {
+        if !use_line(tight) {
+            continue;
+        }
+        eprintln!("finish: get off at {} with only {} missing → run there, done {} min later",
+            f.name, canton_list(&tt, f.cantons), f.secs / 60);
+        for s in stops {
+            rules.finish_of_stop[s as usize] = rules.finish.len() as u32;
+        }
+        rules.finish.push(f);
+    }
+    for (from, xs, tight) in read_excursions(&tt, &args.excursion_file) {
+        let x0 = &xs[0];
+        if !use_line(tight) {
+            eprintln!("excursion: {} → {} left out", x0.from_name, x0.to_name);
+            continue;
+        }
+        eprintln!("excursion: get off at {}, bike via {} → {} in {} min{}", x0.from_name,
+            canton_list(&tt, x0.cantons), x0.to_name, x0.secs / 60, if tight { "  (tight)" } else { "" });
+        for x in xs {
+            let e = rules.excursions.len() as u32;
+            for &s in &from {
+                rules.excursions_of_stop.entry(s).or_default().push(e);
             }
-            rules.finish.push(f);
+            rules.excursions.push(x);
         }
     }
     if !args.no_detour {
@@ -429,7 +572,11 @@ fn main() {
     let t1 = std::time::Instant::now();
     let extra: Vec<(u32, u32)> = (0..tt.n_stops() as u32)
         .filter_map(|s| {
-            let c = rules.bonus_at(s).map_or(0, |b| b.cantons) | rules.finish_at(s).map_or(0, |f| f.cantons);
+            let c = rules.bonus_at(s).map_or(0, |b| b.cantons)
+                | rules.finish_at(s).map_or(0, |f| f.cantons)
+                | rules.excursions_of_stop.get(&s).map_or(0, |l| {
+                    l.iter().fold(0, |m, &e| m | rules.excursions[e as usize].cantons)
+                });
             (c != 0).then_some((s, c))
         })
         .collect();
