@@ -36,6 +36,8 @@ pub const VIA_SHIFT: u32 = 26;
 pub const MAX_VIA: usize = 5;
 /// mask bit: the mandatory end station was reached after everything else
 pub const END_BIT: u32 = 1 << 31;
+/// in a `Kind::Run` node's `b`: one-way finishing run (see `Rules::finish`), not there-and-back
+pub const FINISH_FLAG: u32 = 1 << 29;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -195,6 +197,11 @@ pub struct Rules {
     /// (e.g. BS, BL, JU, SO, BE: the Basel SBB ↔ Biel/Bienne train). Stepping on one of
     /// them elsewhere adds nothing, so the beam doesn't chase them one by one. 0 = off.
     pub ride_group: u32,
+    /// finishing runs, per stop: index into `finish`, or NONE. Getting off at (or walking to)
+    /// such a station when its canton(s) are the only ones still missing ends the trip
+    /// `secs` later, on foot across the border (e.g. Schaffhausen → Thurgau in 10 min).
+    pub finish_of_stop: Vec<u32>,
+    pub finish: Vec<Bonus>,
 }
 
 impl Rules {
@@ -202,6 +209,7 @@ impl Rules {
         Rules {
             via_of_stop: vec![0; n_stops],
             bonus_of_stop: vec![NONE; n_stops],
+            finish_of_stop: vec![NONE; n_stops],
             detour_of_stop: vec![0; n_stops],
             end_of_stop: vec![0; n_stops],
             ..Default::default()
@@ -260,6 +268,12 @@ impl Rules {
     /// Bits a complete solution must have: cantons, via stations, end station.
     pub fn goal(&self, required: u32) -> u32 {
         required | self.via_bits() | if self.end_name.is_some() { END_BIT } else { 0 }
+    }
+
+    #[inline]
+    pub fn finish_at(&self, stop: u32) -> Option<&Bonus> {
+        let i = *self.finish_of_stop.get(stop as usize)?;
+        (i != NONE).then(|| &self.finish[i as usize])
     }
 
     #[inline]
@@ -462,7 +476,28 @@ impl<'a> Search<'a> {
     /// A label reaches `stop` at `time` with `mask` and can board again at `ready`.
     /// The step that got it there is `node` (its index is created only when needed).
     /// Returns (index of the pushed node, whether the label was kept at the stop).
+    /// Off the vehicle at a finish station with only its canton(s) missing: run there and
+    /// stop. Returns the arrival node's index if it had to be created.
+    fn try_finish(&mut self, mask: u32, stop: u32, time: u32, node: Node) -> Option<u32> {
+        let f = self.rules.finish_at(stop)?;
+        let (cantons, secs) = (f.cantons, f.secs);
+        if mask & self.req == self.req {
+            return None;
+        }
+        let mf = self.rules.adv(self.tt, mask | cantons, stop);
+        let ta = time + secs;
+        if mf & self.req != self.req || ta >= self.best.arrival {
+            return None;
+        }
+        let idx = self.nodes.len() as u32;
+        self.nodes.push(node.into());
+        self.nodes.push(Node { parent: idx, kind: Kind::Run, a: stop, b: cantons | FINISH_FLAG, time: ta }.into());
+        self.consider(mf, ta, idx + 1);
+        Some(idx)
+    }
+
     fn reach(&mut self, mask: u32, stop: u32, time: u32, ready: u32, node: Node) -> (Option<u32>, bool) {
+        let fin = self.try_finish(mask, stop, time, node);
         let full = mask & self.req == self.req;
         let ins = if full {
             None
@@ -473,10 +508,15 @@ impl<'a> Search<'a> {
             }
         };
         if !full && ins.is_none() {
-            return (None, false);
+            return (fin, false);
         }
-        let idx = self.nodes.len() as u32;
-        self.nodes.push(node.into());
+        let idx = match fin {
+            Some(i) => i,
+            None => {
+                self.nodes.push(node.into());
+                self.nodes.len() as u32 - 1
+            }
+        };
         self.consider(mask, time, idx);
         if let Some(i) = ins {
             self.stop_sets[stop as usize][i].node = idx;
@@ -511,7 +551,12 @@ impl<'a> Search<'a> {
     /// `make_node` is the step that got us here; `pushed` is its index if already created.
     /// `plain = false`: only the bonus run is allowed here (detour obligation still open).
     fn arrive(&mut self, mask: u32, stop: u32, time: u32, change: u32, node: Node, plain: bool) {
-        let (pushed, kept) = if plain { self.reach(mask, stop, time, time + change, node) } else { (None, false) };
+        let (pushed, kept) = if plain {
+            self.reach(mask, stop, time, time + change, node)
+        } else {
+            // detour obligation still open: a finishing run that completes everything is fine
+            (self.try_finish(mask, stop, time, node), false)
+        };
         if kept {
             self.relax_links(stop, time, mask, pushed.unwrap());
         }

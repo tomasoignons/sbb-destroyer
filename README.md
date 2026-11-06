@@ -63,6 +63,19 @@ Set `SBB_PYTHON=/path/to/python` if the `sbb` conda env lives somewhere unusual.
   the train waits" under that ride. The lower bounds treat these stations as already
   in those cantons, so pruning stays exact. Turn it off with `--no-bonus` or the web checkbox.
   Genève 05:00, beam 8,32,128: **18h01** with bike + run-for-it stations.
+* **Finishing runs** (`finish_stations.tsv`): if you get off at one of these stations (or walk or
+  cycle there) and its canton is the **last one missing**, run across the border and the trip
+  ends there, one way:
+
+  | station | run | last canton |
+  |---|---|---|
+  | Schaffhausen | 10 min | Thurgau |
+  | Aigle | 8 min | Valais |
+  | Nyon | 10 min | Genève |
+
+  Shown as a "Finish run" step. The lower bounds treat these stations as already in that canton,
+  so pruning stays exact. `--no-bonus` / the run-for-it checkbox turns these off too. Example:
+  St. Gallen 05:00–07:00 (beam 8,32) ends Schaffhausen → Thurgau, 18h58 → 18h53.
 
 * **Via stations first** (`--via-first`, or the "Go to these first, directly" toggle under the
   via field): the via stations become the route's first destinations. The solver takes the
@@ -220,6 +233,14 @@ Appenzell:** bike legs that start, end or cross AR or AI are dropped (checked ag
 outlines; walking there is still allowed). Change with `./sbb day <date> --bike-banned-cantons
 "…"` (`''` = no ban). The trip clock starts
 at the first vehicle **or** bike leg. Genève 05:00 on 14 Nov: 19h27 without a bike → 18h52 with one.
+
+**Bike only when needed** (`solver/src/repair.rs`): after the search, each bike leg A → B of every
+result is checked. If trains, buses or walking can leave A at the same time and still catch the
+route's next connection at B (or reach B as early, if nothing follows), the bike leg is replaced
+by that. The rest of the route is unchanged, so the trip never gets longer. Between start times
+with equal trip times, the one with fewer bike legs wins. The log says how many were replaced
+(`bike: 25 of 65 bike leg(s) replaced …`). Replacements follow the same 1-minute change rule as
+the search, so some are tight.
 
 ## How it works
 

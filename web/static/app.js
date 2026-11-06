@@ -121,7 +121,9 @@
   // bonus stations description
   api("/api/bonus").then(rows => {
     $("#bonus-desc").textContent = rows.length
-      ? rows.map(r => `${r.station} (≥ ${r.minutes} min) → ${r.cantons.split(",").map(x => x.trim()).join(" + ")}`).join(" · ")
+      ? rows.filter(r => !r.finish).map(r => `${r.station} (≥ ${r.minutes} min) → ${r.cantons.split(",").map(x => x.trim()).join(" + ")}`).join(" · ")
+        + (rows.some(r => r.finish) ? " · to finish, as the last canton: "
+          + rows.filter(r => r.finish).map(r => `${r.station} → ${r.cantons} (${r.minutes} min)`).join(" · ") : "")
       : "none defined in bonus_stations.tsv";
   }).catch(() => {});
 

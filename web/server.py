@@ -398,12 +398,13 @@ class Api(BaseHTTPRequestHandler):
             })
         if p == "/api/bonus":
             rows = []
-            f = ROOT / "bonus_stations.tsv"
-            if f.exists():
-                for line in f.read_text(encoding="utf-8").splitlines():
-                    parts = [x.strip() for x in line.split("\t")]
-                    if line.strip() and not line.startswith("#") and len(parts) >= 3:
-                        rows.append({"station": parts[0], "minutes": parts[1], "cantons": parts[2]})
+            for name, finish in (("bonus_stations.tsv", False), ("finish_stations.tsv", True)):
+                f = ROOT / name
+                if f.exists():
+                    for line in f.read_text(encoding="utf-8").splitlines():
+                        parts = [x.strip() for x in line.split("\t")]
+                        if line.strip() and not line.startswith("#") and len(parts) >= 3:
+                            rows.append({"station": parts[0], "minutes": parts[1], "cantons": parts[2], "finish": finish})
             return self.send_json(rows)
         if p == "/api/detours":
             rows = []

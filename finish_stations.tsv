@@ -1,0 +1,8 @@
+# Finishing runs: if you get off at this station (or walk/cycle there) and the listed
+# canton(s) are the ONLY ones still missing, run across the border: the trip ends
+# <minutes> later, in that canton. One way, unlike bonus_stations.tsv (there and back).
+#
+# station (exact name, see `./sbb find`)<TAB>minutes<TAB>cantons (comma-separated)
+Schaffhausen	10	Thurgau
+Aigle	8	Valais
+Nyon	10	Genève

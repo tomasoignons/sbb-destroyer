@@ -209,7 +209,11 @@
           what = `<div class="what"><span class="badge">Start</span></div><div class="route">${esc(l.from.name)}</div>`;
         } else if (l.kind === "run") {
           const mins = Math.max(1, Math.round((l.arr_s - l.dep_s) / 60));
-          what = `<div class="what"><span class="badge"><i></i>Run</span>
+          what = l.finish
+            ? `<div class="what"><span class="badge"><i></i>Finish run</span>
+                    <span class="dir">${mins} min, one way</span></div>
+                  <div class="route">${esc(l.from.name)}: across the border to the last canton</div>`
+            : `<div class="what"><span class="badge"><i></i>Run</span>
                     <span class="dir">leave ≥ ${mins} min after arriving</span></div>
                   <div class="route">${esc(l.from.name)}: across the border and back</div>`;
         } else if (l.kind === "walk" || l.kind === "bike") {

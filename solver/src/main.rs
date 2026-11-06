@@ -1,6 +1,7 @@
 mod data;
 mod heuristic;
 mod output;
+mod repair;
 mod solver;
 
 use clap::Parser;
@@ -101,9 +102,14 @@ struct Args {
     #[arg(long, default_value = "bonus_stations.tsv")]
     bonus_file: PathBuf,
 
-    /// ignore the bonus stations file
+    /// ignore the bonus stations file (and the finish stations file)
     #[arg(long)]
     no_bonus: bool,
+
+    /// finishing runs: TSV file  station<TAB>minutes<TAB>canton[,canton]  (get off there
+    /// when only those cantons are missing -> run across the border, trip ends minutes later)
+    #[arg(long, default_value = "finish_stations.tsv")]
+    finish_file: PathBuf,
 
     /// detour rules: TSV file  station<TAB>canton[,canton]  ("at this station without these
     /// cantons -> board only trains that still stop there, and get off only once reached")
@@ -221,6 +227,41 @@ fn distinct_minutes(times: &[u32], lo: u32, hi: u32) -> Vec<u32> {
         .collect()
 }
 
+/// `station<TAB>minutes<TAB>canton[,canton]` lines (bonus / finish stations files).
+fn read_station_file(tt: &Timetable, path: &std::path::Path, what: &str) -> Vec<(Vec<u32>, Bonus)> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        eprintln!("note: no {what} stations file at {}", path.display());
+        return vec![];
+    };
+    let mut out = vec![];
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+        let f: Vec<&str> = line.split('\t').map(str::trim).collect();
+        if f.len() < 3 {
+            eprintln!("{what} file: skipping malformed line {line:?}");
+            continue;
+        }
+        let mut cantons = 0u32;
+        for cn in f[2].split(',').map(str::trim) {
+            match tt.canton_names.iter().position(|n| n.eq_ignore_ascii_case(cn)) {
+                Some(c) => cantons |= 1 << c,
+                None => eprintln!("{what} file: unknown canton {cn:?}"),
+            }
+        }
+        let stops = tt.stops_named(f[0]);
+        let mins: f64 = f[1].parse().unwrap_or(0.0);
+        if stops.is_empty() || cantons == 0 {
+            eprintln!("{what} file: skipping {line:?} (unknown station or no canton)");
+            continue;
+        }
+        out.push((stops, Bonus { name: f[0].to_owned(), secs: (mins * 60.0) as u32, cantons }));
+    }
+    out
+}
+
+fn canton_list(tt: &Timetable, mask: u32) -> String {
+    (0..26).filter(|c| mask & (1 << c) != 0).map(|c| tt.canton_names[c].as_str()).collect::<Vec<_>>().join(", ")
+}
+
 fn parse_hm(s: &str) -> u32 {
     let mut it = s.split(':');
     let h: u32 = it.next().unwrap().trim().parse().expect("time HH:MM");
@@ -324,36 +365,20 @@ fn main() {
         );
     }
     if !args.no_bonus {
-        match std::fs::read_to_string(&args.bonus_file) {
-            Err(_) => eprintln!("note: no bonus stations file at {}", args.bonus_file.display()),
-            Ok(text) => {
-                for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
-                    let f: Vec<&str> = line.split('\t').map(str::trim).collect();
-                    if f.len() < 3 {
-                        eprintln!("bonus file: skipping malformed line {line:?}");
-                        continue;
-                    }
-                    let mut cantons = 0u32;
-                    for cn in f[2].split(',').map(str::trim) {
-                        match tt.canton_names.iter().position(|n| n.eq_ignore_ascii_case(cn)) {
-                            Some(c) => cantons |= 1 << c,
-                            None => eprintln!("bonus file: unknown canton {cn:?}"),
-                        }
-                    }
-                    let stops = tt.stops_named(f[0]);
-                    let mins: f64 = f[1].parse().unwrap_or(0.0);
-                    if stops.is_empty() || cantons == 0 {
-                        eprintln!("bonus file: skipping {line:?} (unknown station or no canton)");
-                        continue;
-                    }
-                    let i = rules.bonus.len() as u32;
-                    for s in stops {
-                        rules.bonus_of_stop[s as usize] = i;
-                    }
-                    rules.bonus.push(Bonus { name: f[0].to_owned(), secs: (mins * 60.0) as u32, cantons });
-                    eprintln!("bonus: alight at {} and leave ≥ {mins} min later → +{}", f[0], f[2]);
-                }
+        for (stops, b) in read_station_file(&tt, &args.bonus_file, "bonus") {
+            eprintln!("bonus: alight at {} and leave ≥ {} min later → +{}", b.name, b.secs / 60, canton_list(&tt, b.cantons));
+            for s in stops {
+                rules.bonus_of_stop[s as usize] = rules.bonus.len() as u32;
             }
+            rules.bonus.push(b);
+        }
+        for (stops, f) in read_station_file(&tt, &args.finish_file, "finish") {
+            eprintln!("finish: get off at {} with only {} missing → run there, done {} min later",
+                f.name, canton_list(&tt, f.cantons), f.secs / 60);
+            for s in stops {
+                rules.finish_of_stop[s as usize] = rules.finish.len() as u32;
+            }
+            rules.finish.push(f);
         }
     }
     if !args.no_detour {
@@ -403,7 +428,10 @@ fn main() {
 
     let t1 = std::time::Instant::now();
     let extra: Vec<(u32, u32)> = (0..tt.n_stops() as u32)
-        .filter_map(|s| rules.bonus_at(s).map(|b| (s, b.cantons)))
+        .filter_map(|s| {
+            let c = rules.bonus_at(s).map_or(0, |b| b.cantons) | rules.finish_at(s).map_or(0, |f| f.cantons);
+            (c != 0).then_some((s, c))
+        })
         .collect();
     let mut bounds = Bounds::compute(&tt, &extra);
     bounds.pair_limit = args.pair_limit;
@@ -588,6 +616,19 @@ fn main() {
             }
         }
     }
+    // use the bike only where nothing else is as fast (same next connections, so the trip
+    // never gets longer)
+    if !args.no_bike {
+        let before: usize = results.iter().map(|(_, r)| repair::bike_legs(&tt, r)).sum();
+        let replaced: usize = results
+            .iter_mut()
+            .filter(|(_, r)| r.complete)
+            .map(|(_, r)| repair::reduce_bike(&tt, r, &rules))
+            .sum();
+        if before > 0 {
+            eprintln!("bike: {replaced} of {before} bike leg(s) replaced by trains/walking that are just as fast");
+        }
+    }
     results.sort_by_key(|(s, _)| *s);
 
     if results.len() > 1 {
@@ -606,7 +647,13 @@ fn main() {
         println!();
     }
 
-    let (_, best) = results.iter().max_by_key(|(_, r)| rank(r)).unwrap();
+    // same trip time: fewer bike legs wins
+    let (_, best) = results
+        .iter()
+        .max_by_key(|(_, r)| {
+            (r.complete, r.mask.count_ones(), Reverse(r.duration(&tt)), Reverse(repair::bike_legs(&tt, r)), Reverse(r.arrival))
+        })
+        .unwrap();
 
     output::print_itinerary(&tt, best, args.min_dwell, &rules);
     println!();

@@ -116,18 +116,21 @@ pub fn legs(tt: &Timetable, sol: &Solution, min_dwell: u32, rules: &Rules) -> Ve
                 });
             }
             Kind::Run => {
-                // run out of a bonus station into the neighbouring canton(s) and back
+                // run out of a bonus station into the neighbouring canton(s) and back, or
+                // (FINISH_FLAG) one way to the last canton(s) at the end of the trip
+                let finish = n.b & FINISH_FLAG != 0;
+                let how = if finish { "run (finish)" } else { "run" };
                 let mut g = vec![];
                 for c in 0..26u8 {
                     let b = 1u32 << c;
                     if n.b & b != 0 && mask & b == 0 {
                         mask |= b;
-                        g.push(Gain { canton: c, via: None, stop: n.a, time: n.time, how: "run" });
+                        g.push(Gain { canton: c, via: None, stop: n.a, time: n.time, how });
                     }
                 }
-                gain(&mut mask, None, n.a, n.time, "run", &mut g); // may complete -> end station
+                gain(&mut mask, None, n.a, n.time, how, &mut g); // may complete -> end station
                 out.push(Leg {
-                    kind: "run",
+                    kind: if finish { "finish" } else { "run" },
                     trip: NONE,
                     from: n.a,
                     to: n.a,
@@ -268,6 +271,17 @@ pub fn print_itinerary(tt: &Timetable, sol: &Solution, min_dwell: u32, rules: &R
                 );
                 gain_lines(l, &mut count);
             }
+            "finish" => {
+                i += 1;
+                println!(
+                    "{i:3}. {} → {}  RUN   from {} across the border to the last canton ({} min, one way)",
+                    fmt_time(l.dep),
+                    fmt_time(l.arr),
+                    tt.stop_name[l.from as usize],
+                    (l.arr - l.dep + 59) / 60
+                );
+                gain_lines(l, &mut count);
+            }
             "walk" | "bike" => {
                 if l.gains.is_empty() && tt.stop_name[l.from as usize] == tt.stop_name[l.to as usize] {
                     continue; // platform change inside a station
@@ -348,7 +362,8 @@ pub fn to_json(tt: &Timetable, sol: &Solution, min_dwell: u32, rules: &Rules) ->
                 })
             };
             json!({
-                "kind": l.kind,
+                "kind": if l.kind == "finish" { "run" } else { l.kind },
+                "finish": l.kind == "finish",
                 "from": stop(l.from),
                 "to": stop(l.to),
                 "path": l.path.iter().map(|&(s, t)| json!({
